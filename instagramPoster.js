@@ -54,8 +54,19 @@ async function createMediaContainer(imageUrl, caption) {
       caption: caption,
       access_token: process.env.IG_ACCESS_TOKEN,
     },
-    { timeout: 30000 }
-  );
+    {
+      timeout: 30000,
+      validateStatus: (s) => {
+        if (s !== 200) {
+          // Log the status for debugging but let axios throw
+        }
+        return s === 200;
+      },
+    }
+  ).catch((err) => {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    throw new Error(`Container creation failed (${err.response?.status}): ${detail}`);
+  });
 
   const containerId = response.data.id;
   console.log(`   ✅ Container created: ${containerId}`);

@@ -129,7 +129,7 @@ app.get("/", (req, res) => {
     <button class="btn secondary" onclick="runFollowOnly()">👤 Follow from Hashtag</button>
     <button class="btn secondary" onclick="runLikeOnly()">❤️ Like Hashtag Posts</button>
     <div id="growth-output" class="output"></div>
-    <div id="growth-status" class="status warn" style="margin-top:0.5rem">⚠️ Add IG_USERNAME + IG_PASSWORD to enable</div>
+    <div id="growth-status" class="status warn" style="margin-top:0.5rem">⚠️ Add IG_SESSION_ID to Render env vars to enable growth</div>
   </div>
 
   <!-- CONTENT PREVIEW -->
@@ -192,6 +192,21 @@ app.get("/", (req, res) => {
     <div class="stat"><span>Categories</span><span class="stat-val">20</span></div>
     <div class="stat"><span>Topics (unlimited)</span><span class="stat-val">∞ AI</span></div>
     <div class="status ok">✅ All Systems Active</div>
+  </div>
+
+  <!-- TOKEN STATUS -->
+  <div class="card">
+    <h2>🔑 Token Status</h2>
+    <div id="token-status-box">
+      <div class="stat"><span>Access Token</span><span class="stat-val" id="token-valid">Checking...</span></div>
+      <div class="stat"><span>IG Account</span><span class="stat-val" id="token-account">—</span></div>
+    </div>
+    <div style="margin-top:1rem">
+      <input type="text" id="new-token-input" placeholder="Paste new IG_ACCESS_TOKEN here" style="font-size:0.75rem" />
+      <button class="btn secondary" onclick="refreshToken()">🔄 Update Token</button>
+    </div>
+    <div id="token-output" class="output"></div>
+    <div class="status warn" style="margin-top:0.5rem;font-size:0.75rem">Tokens expire every 60 days. Get new one at developers.facebook.com → Graph API Explorer</div>
   </div>
 
   <!-- REACH CALCULATOR -->
@@ -334,7 +349,7 @@ async function loadGrowthStats() {
   document.getElementById('pb-comments').style.width = Math.min(100, (d.today.comments / d.limits.comments) * 100) + '%';
   document.getElementById('growth-badge').textContent = d.engineEnabled ? 'ACTIVE' : 'SETUP NEEDED';
   document.getElementById('growth-badge').style.background = d.engineEnabled ? '#2e7d32' : '#8B0000';
-  document.getElementById('growth-status').textContent = d.engineEnabled ? '✅ Growth engine active' : '⚠️ Add IG_USERNAME + IG_PASSWORD to enable follows/likes/DMs';
+  document.getElementById('growth-status').textContent = d.engineEnabled ? '✅ Growth engine active' : '⚠️ Add IG_SESSION_ID to Render env vars to enable growth follows/likes/DMs';
   document.getElementById('growth-status').className = 'status ' + (d.engineEnabled ? 'ok' : 'warn');
   document.getElementById('hdr-follows').textContent = d.today.follows;
   document.getElementById('hdr-likes').textContent = d.today.likes;
@@ -365,13 +380,48 @@ async function loadRecentLog() {
   }
 }
 
+async function checkTokenStatus() {
+  const d = await fetch('/api/token-status').then(r => r.json());
+  const el = document.getElementById('token-valid');
+  const acEl = document.getElementById('token-account');
+  if (d.valid) {
+    el.textContent = '✅ Valid';
+    el.style.color = '#4CAF50';
+    acEl.textContent = '@' + (d.account?.username || '—') + ' (' + (d.account?.followers_count||0).toLocaleString() + ' followers)';
+  } else {
+    el.textContent = '❌ EXPIRED — update required';
+    el.style.color = '#f66';
+    acEl.textContent = d.error?.slice(0,60) || 'Unknown error';
+    document.getElementById('token-status-box').style.border = '1px solid #8B0000';
+    document.getElementById('token-status-box').style.padding = '0.5rem';
+    document.getElementById('token-status-box').style.borderRadius = '6px';
+  }
+}
+
+async function refreshToken() {
+  const token = document.getElementById('new-token-input').value.trim();
+  if (!token) { alert('Paste your new token first'); return; }
+  const out = document.getElementById('token-output');
+  out.style.display = 'block';
+  out.textContent = 'Updating token...';
+  const d = await fetch('/api/refresh-token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token })
+  }).then(r => r.json());
+  out.textContent = JSON.stringify(d, null, 2);
+  checkTokenStatus();
+}
+
 // Init
 loadStats();
 loadGrowthStats();
 loadRecentLog();
 getStats();
+checkTokenStatus();
 setInterval(loadGrowthStats, 60000);
 setInterval(loadStats, 60000);
+setInterval(checkTokenStatus, 300000);
 </script>
 </body>
 </html>`);
@@ -468,6 +518,27 @@ app.get("/api/growth/like", async (req, res) => {
   const tag = "tamilculture";
   const liked = await likeFromHashtag(tag, 20);
   res.json({ liked, hashtag: tag });
+});
+
+// ─── TOKEN REFRESH ───────────────────────────────────────────────────────────
+app.post("/api/refresh-token", (req, res) => {
+  const { token } = req.body;
+  if (!token || token.length < 20) return res.status(400).json({ error: "Invalid token" });
+  process.env.IG_ACCESS_TOKEN = token;
+  res.json({ success: true, message: "Token updated in memory. Also update Render env var IG_ACCESS_TOKEN." });
+});
+
+app.get("/api/token-status", async (req, res) => {
+  try {
+    const r = await require("axios").get(
+      `https://graph.facebook.com/v21.0/${process.env.IG_BUSINESS_ACCOUNT_ID}`,
+      { params: { fields: "id,username,followers_count", access_token: process.env.IG_ACCESS_TOKEN } }
+    );
+    res.json({ valid: true, account: r.data });
+  } catch (e) {
+    const err = e.response?.data?.error;
+    res.json({ valid: false, error: err?.message || e.message, code: err?.code });
+  }
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
