@@ -106,13 +106,54 @@ async function getIg() {
   }
 
   try {
+    // Full device simulation before login
+    _ig.state.generateDevice(process.env.IG_USERNAME);
+    await _ig.simulate.preLoginFlow();
+    await new Promise((r) => setTimeout(r, 1500 + Math.random() * 2000));
+
     await _ig.account.login(process.env.IG_USERNAME, process.env.IG_PASSWORD);
+
+    process.nextTick(async () => {
+      try { await _ig.simulate.postLoginFlow(); } catch {}
+    });
+
     fs.writeFileSync(sessionFile, JSON.stringify(await _ig.exportState()));
     _igReady = true;
-    console.log("✅ Growth engine: logged in");
+    console.log("✅ Growth engine: logged in as @" + process.env.IG_USERNAME);
+
   } catch (err) {
-    console.error("❌ Growth engine login failed:", err.message);
-    _ig = null;
+    if (err.name === "IgCheckpointError") {
+      console.log("⚠️  Instagram security checkpoint — attempting auto-resolve...");
+      try {
+        await _ig.challenge.auto(true);
+        await new Promise((r) => setTimeout(r, 3000));
+        await _ig.account.login(process.env.IG_USERNAME, process.env.IG_PASSWORD);
+        fs.writeFileSync(sessionFile, JSON.stringify(await _ig.exportState()));
+        _igReady = true;
+        console.log("✅ Growth engine: logged in after challenge");
+      } catch (e2) {
+        console.error("❌ Challenge failed:", e2.message);
+        _ig = null;
+      }
+    } else if (err.message?.includes("linked Facebook account") || err.response?.status === 400) {
+      console.error(`
+❌ INSTAGRAM LOGIN BLOCKED — Facebook-linked account detected.
+
+FIX (takes 2 minutes):
+1. Open Instagram app on your phone
+2. Go to Settings → Security → Password
+3. Tap "Add Password" and set a NEW Instagram-only password
+4. Update IG_PASSWORD in your .env and Render env vars with the new password
+5. Restart the server
+
+This is required because your account (@${process.env.IG_USERNAME}) was linked to Facebook.
+Content posting still works normally — only growth engine is affected.
+`);
+      _ig = null;
+    } else {
+      console.error("❌ Growth engine login failed:", err.message);
+      _ig = null;
+    }
   }
   return _ig;
 }
