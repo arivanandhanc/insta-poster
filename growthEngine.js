@@ -402,6 +402,7 @@ function getGrowthStats() {
 module.exports = {
   runGrowthCycle,
   getGrowthStats,
+  verifySession,
   followFromHashtag,
   likeFromHashtag,
   commentFromHashtag,

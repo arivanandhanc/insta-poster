@@ -20,7 +20,6 @@
     "express": "^5.2.1",
     "form-data": "^4.0.5",
     "groq-sdk": "^1.2.1",
-    "instagram-private-api": "^1.0.0",
     "node-cron": "^4.2.1"
   },
   "devDependencies": {

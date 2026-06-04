@@ -7,3 +7,4 @@ follow_log.json
 used_topics.json
 ig_session.json
 *.log
+test-local.js

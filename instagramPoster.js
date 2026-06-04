@@ -140,6 +140,21 @@ async function getPostInsights(postId) {
 async function postToInstagram(imagePath, caption) {
   console.log("\n📸 Starting Instagram post workflow...");
 
+  // Quick token check before wasting time on image upload
+  try {
+    await axios.get(`${FB_BASE}/${process.env.IG_BUSINESS_ACCOUNT_ID}`, {
+      params: { fields: "id", access_token: process.env.IG_ACCESS_TOKEN },
+      timeout: 8000,
+    });
+  } catch (e) {
+    if (e.response?.data?.error?.code === 190) {
+      console.error("\n❌ Instagram Access Token EXPIRED.");
+      console.error("   Get a new token at: developers.facebook.com/tools/explorer");
+      console.error("   Then update IG_ACCESS_TOKEN in Render environment variables.");
+      return { success: false, error: "ACCESS_TOKEN_EXPIRED" };
+    }
+  }
+
   try {
     // Step 1: Upload image to public host
     const imageUrl = await uploadImageToHost(imagePath);

@@ -520,6 +520,41 @@ app.get("/api/growth/like", async (req, res) => {
   res.json({ liked, hashtag: tag });
 });
 
+// ─── HEALTH CHECK ────────────────────────────────────────────────────────────
+app.get("/api/health", async (req, res) => {
+  const axios = require("axios");
+  const log = loadLog();
+  const today = new Date().toISOString().split("T")[0];
+
+  // Check IG token
+  let tokenOk = false, igUsername = null;
+  try {
+    const r = await axios.get(`https://graph.facebook.com/v21.0/${process.env.IG_BUSINESS_ACCOUNT_ID}`, {
+      params: { fields: "username,followers_count", access_token: process.env.IG_ACCESS_TOKEN },
+      timeout: 8000,
+    });
+    tokenOk = true;
+    igUsername = r.data.username;
+  } catch {}
+
+  const { getGrowthStats } = require("./growthEngine");
+  const gs = getGrowthStats();
+
+  res.json({
+    status: tokenOk ? "ok" : "token_expired",
+    token: tokenOk ? "✅ valid" : "❌ expired — get new token at developers.facebook.com/tools/explorer",
+    igAccount: igUsername || "unknown",
+    growthEngine: gs.engineEnabled ? "✅ active" : "❌ needs IG_SESSION_ID env var",
+    postsToday: log.filter((e) => e.timestamp?.startsWith(today)).length,
+    postsTotal: log.length,
+    successfulPosts: log.filter((e) => e.type === "success").length,
+    lastPost: log[0]?.timestamp || "none",
+    uptime: process.uptime().toFixed(0) + "s",
+    topics: ALL_TOPICS.length + "+ (unlimited AI)",
+    actions: gs.today,
+  });
+});
+
 // ─── TOKEN REFRESH ───────────────────────────────────────────────────────────
 app.post("/api/refresh-token", (req, res) => {
   const { token } = req.body;
