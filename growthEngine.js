@@ -1,28 +1,30 @@
+
 require("./dns-fix");
-const { IgApiClient } = require("instagram-private-api");
+const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
-// ─── DAILY ACTION LIMITS (safe for account health) ────────────────────────────
+// ─── DAILY ACTION LIMITS ──────────────────────────────────────────────────────
+// Instagram bans accounts for rapid automation. These limits + human-like delays
+// are the MAXIMUM you can do without triggering detection.
 const LIMITS = {
-  follows: 120,
-  unfollows: 80,
-  likes: 250,
-  comments: 30,
-  dms: 20,
-  storyViews: 200,
+  follows: 150,    // 7 cycles × ~20/cycle — spaced 3min apart
+  unfollows: 100,
+  likes: 400,      // 7 cycles × ~55/cycle — spaced 45s apart
+  comments: 40,    // 7 cycles × ~5/cycle — spaced 8min apart
+  dms: 25,
 };
 
-// ─── TARGET HASHTAGS (Tamil diaspora + culture audience) ─────────────────────
+// ─── TARGET HASHTAGS ──────────────────────────────────────────────────────────
 const TARGET_HASHTAGS = [
   "tamilnadu", "tamil", "tamilculture", "tamizhan", "tamilhistory",
   "tamiltemples", "chennaidiaries", "tamilfood", "tamilfestival",
-  "tamilsangam", "tamilnadu_ig", "incredibletamilnadu", "tamilpride",
-  "southindia", "tamilheritagee", "dravidian", "cholaempire",
-  "tamilachtm", "tamilunitedd", "tamilnewgen",
+  "tamilnadu_ig", "incredibletamilnadu", "tamilpride",
+  "southindia", "dravidian", "cholaempire", "tamildiaspora",
+  "tamilachievements", "tamilviral", "tamilnewgen", "tamilheritage",
 ];
 
-// ─── COMMENT BANK (varied, authentic-feeling) ────────────────────────────────
+// ─── COMMENT BANK ────────────────────────────────────────────────────────────
 const COMMENTS = [
   "This is exactly what more people need to know! 🙏",
   "Tamil culture never fails to amaze me ❤️",
@@ -31,389 +33,343 @@ const COMMENTS = [
   "I never knew this — mind blown! 🤯",
   "Our history is so rich and beautiful 🌺",
   "Every Tamil needs to see this! ❤️🙏",
-  "Incredible! The world needs to know about Tamil civilisation 🌍",
+  "The world needs to know about Tamil civilisation 🌍",
   "This gave me chills! Proud Tamil 🦁",
   "Such an underrated part of world history! 📚",
   "Bookmark this — important piece of our heritage 🔖",
   "Teaching my kids this today! ❤️",
   "So proud of our Tamil ancestors! 🏆",
   "This is why Tamil culture is eternal 🕉️",
-  "Amazing facts! More people should follow this page 🙌",
+  "Amazing! More people should follow this page 🙌",
 ];
 
-// ─── DM TEMPLATES (welcome + promo) ──────────────────────────────────────────
+// ─── DM WELCOME MESSAGES ─────────────────────────────────────────────────────
 const DM_WELCOME = [
   "🙏 Welcome to our Tamil culture family! We post daily about Tamil history, temples, food & achievements. Turn on notifications so you don't miss anything!",
-  "Thank you for following! ❤️ TamilNadu Unfiltered posts amazing Tamil history facts daily. You'll love what we have coming up — stay tuned! 🏛️",
-  "Vanakkam! 🙏 So glad you found us. We're on a mission to show the world how incredible Tamil civilisation is. Welcome to the family! 🌺",
+  "Thank you for following! ❤️ TamilNadu Unfiltered posts amazing Tamil history facts daily. Stay tuned! 🏛️",
+  "Vanakkam! 🙏 So glad you found us. We're on a mission to show the world how incredible Tamil civilisation is! 🌺",
 ];
 
-// ─── ACTION LOG ───────────────────────────────────────────────────────────────
-const GROWTH_LOG_FILE = path.join(__dirname, "growth_log.json");
-const FOLLOW_LOG_FILE = path.join(__dirname, "follow_log.json");
+// ─── LOGS ─────────────────────────────────────────────────────────────────────
+const GROWTH_LOG = path.join(__dirname, "growth_log.json");
+const FOLLOW_LOG = path.join(__dirname, "follow_log.json");
 
 function loadGrowthLog() {
-  if (!fs.existsSync(GROWTH_LOG_FILE)) return [];
-  try { return JSON.parse(fs.readFileSync(GROWTH_LOG_FILE, "utf8")); } catch { return []; }
+  try { return JSON.parse(fs.readFileSync(GROWTH_LOG, "utf8")); } catch { return []; }
 }
-
 function saveGrowthLog(log) {
-  fs.writeFileSync(GROWTH_LOG_FILE, JSON.stringify(log.slice(0, 2000), null, 2));
+  fs.writeFileSync(GROWTH_LOG, JSON.stringify(log.slice(0, 2000), null, 2));
 }
-
 function logAction(type, detail = "") {
   const log = loadGrowthLog();
   log.unshift({ type, detail, timestamp: new Date().toISOString() });
   saveGrowthLog(log);
 }
-
 function loadFollowLog() {
-  if (!fs.existsSync(FOLLOW_LOG_FILE)) return {};
-  try { return JSON.parse(fs.readFileSync(FOLLOW_LOG_FILE, "utf8")); } catch { return {}; }
+  try { return JSON.parse(fs.readFileSync(FOLLOW_LOG, "utf8")); } catch { return {}; }
 }
-
-function saveFollowLog(data) {
-  fs.writeFileSync(FOLLOW_LOG_FILE, JSON.stringify(data, null, 2));
+function saveFollowLog(d) {
+  fs.writeFileSync(FOLLOW_LOG, JSON.stringify(d, null, 2));
 }
-
-// Count actions done today
 function todayCount(type) {
-  const log = loadGrowthLog();
   const today = new Date().toISOString().split("T")[0];
-  return log.filter((e) => e.type === type && e.timestamp.startsWith(today)).length;
+  return loadGrowthLog().filter((e) => e.type === type && e.timestamp.startsWith(today)).length;
 }
 
-// ─── INSTAGRAM PRIVATE API CLIENT ────────────────────────────────────────────
-let _ig = null;
-let _igReady = false;
+// ─── HTTP CLIENT (web session-based, no private-api library) ─────────────────
+const IG_UA = "Instagram 295.0.0.32.109 Android (28/9; 420dpi; 1080x2220; OnePlus; ONEPLUS A6013; OnePlus6T; qcom; en_US; 497264312)";
+const IG_APP_ID = "936619743392459";
 
-async function getIg() {
-  if (_igReady) return _ig;
-  if (!process.env.IG_USERNAME || !process.env.IG_PASSWORD) return null;
+function getHeaders() {
+  const sessionId = decodeURIComponent(process.env.IG_SESSION_ID || "");
+  const csrf = process.env.IG_CSRF_TOKEN || "";
+  return {
+    "User-Agent": IG_UA,
+    Cookie: `sessionid=${sessionId}; csrftoken=${csrf}`,
+    "X-CSRFToken": csrf,
+    "X-IG-App-ID": IG_APP_ID,
+    "X-IG-Capabilities": "3brTvwE=",
+    "X-IG-Connection-Type": "WIFI",
+  };
+}
 
-  _ig = new IgApiClient();
-  _ig.state.generateDevice(process.env.IG_USERNAME);
+let _sessionVerified = false;
 
-  // Load saved session if exists
-  const sessionFile = path.join(__dirname, "ig_session.json");
-  if (fs.existsSync(sessionFile)) {
-    try {
-      await _ig.importState(JSON.parse(fs.readFileSync(sessionFile, "utf8")));
-      _igReady = true;
-      console.log("✅ Growth engine: session restored");
-      return _ig;
-    } catch { /* session expired, re-login */ }
-  }
-
+async function verifySession() {
+  if (_sessionVerified) return true;
+  if (!process.env.IG_SESSION_ID) return false;
   try {
-    // Full device simulation before login
-    _ig.state.generateDevice(process.env.IG_USERNAME);
-    await _ig.simulate.preLoginFlow();
-    await new Promise((r) => setTimeout(r, 1500 + Math.random() * 2000));
-
-    await _ig.account.login(process.env.IG_USERNAME, process.env.IG_PASSWORD);
-
-    process.nextTick(async () => {
-      try { await _ig.simulate.postLoginFlow(); } catch {}
-    });
-
-    fs.writeFileSync(sessionFile, JSON.stringify(await _ig.exportState()));
-    _igReady = true;
-    console.log("✅ Growth engine: logged in as @" + process.env.IG_USERNAME);
-
-  } catch (err) {
-    if (err.name === "IgCheckpointError") {
-      console.log("⚠️  Instagram security checkpoint — attempting auto-resolve...");
-      try {
-        await _ig.challenge.auto(true);
-        await new Promise((r) => setTimeout(r, 3000));
-        await _ig.account.login(process.env.IG_USERNAME, process.env.IG_PASSWORD);
-        fs.writeFileSync(sessionFile, JSON.stringify(await _ig.exportState()));
-        _igReady = true;
-        console.log("✅ Growth engine: logged in after challenge");
-      } catch (e2) {
-        console.error("❌ Challenge failed:", e2.message);
-        _ig = null;
-      }
-    } else if (err.message?.includes("linked Facebook account") || err.response?.status === 400) {
-      console.error(`
-❌ INSTAGRAM LOGIN BLOCKED — Facebook-linked account detected.
-
-FIX (takes 2 minutes):
-1. Open Instagram app on your phone
-2. Go to Settings → Security → Password
-3. Tap "Add Password" and set a NEW Instagram-only password
-4. Update IG_PASSWORD in your .env and Render env vars with the new password
-5. Restart the server
-
-This is required because your account (@${process.env.IG_USERNAME}) was linked to Facebook.
-Content posting still works normally — only growth engine is affected.
-`);
-      _ig = null;
-    } else {
-      console.error("❌ Growth engine login failed:", err.message);
-      _ig = null;
+    const r = await axios.get(
+      "https://i.instagram.com/api/v1/accounts/current_user/?edit=true",
+      { headers: getHeaders(), timeout: 10000 }
+    );
+    if (r.data?.user) {
+      _sessionVerified = true;
+      console.log(`✅ Growth engine active for @${r.data.user.username}`);
+      return true;
     }
+    return false;
+  } catch (err) {
+    if (err.response?.status === 400) {
+      console.log("⚠️  Session expired — run: node get-session.js");
+    } else {
+      console.log("⚠️  Session check failed:", err.message);
+    }
+    return false;
   }
-  return _ig;
 }
 
-// ─── HUMAN-LIKE DELAY ─────────────────────────────────────────────────────────
-function delay(minMs = 2000, maxMs = 6000) {
-  const ms = minMs + Math.random() * (maxMs - minMs);
-  return new Promise((r) => setTimeout(r, ms));
+// ─── HUMAN-LIKE DELAY ────────────────────────────────────────────────────────
+// Longer delays = undetected. Faster = session ban. Don't reduce these.
+const delay = (min = 2000, max = 6000) =>
+  new Promise((r) => setTimeout(r, min + Math.random() * (max - min)));
+
+const delayFollow = () => delay(45000, 90000);   // 45-90s between follows
+const delayLike   = () => delay(8000, 20000);    // 8-20s between likes
+const delayComment = () => delay(180000, 360000); // 3-6min between comments
+
+// ─── SEARCH POSTS BY HASHTAG ─────────────────────────────────────────────────
+async function getHashtagPosts(hashtag) {
+  try {
+    const r = await axios.post(
+      `https://i.instagram.com/api/v1/tags/${hashtag}/sections/`,
+      `max_id=&page=1&_uuid=${Math.random().toString(36)}&tab=recent&include_persistent=0`,
+      {
+        headers: {
+          ...getHeaders(),
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        },
+        timeout: 12000,
+      }
+    );
+    const sections = r.data?.sections || [];
+    const posts = [];
+    for (const section of sections) {
+      const medias = section.layout_content?.medias || [];
+      for (const m of medias) {
+        if (m.media) posts.push(m.media);
+      }
+    }
+    return posts;
+  } catch {
+    return [];
+  }
 }
 
-// ─── FOLLOW USERS FROM TARGET HASHTAG ────────────────────────────────────────
+// ─── FOLLOW USER ──────────────────────────────────────────────────────────────
+// Returns: 'ok' | 'ratelimit' | 'session_expired' | 'error'
+async function followUser(userId, username) {
+  try {
+    const r = await axios.post(
+      `https://i.instagram.com/api/v1/friendships/create/${userId}/`,
+      `_uuid=${Math.random().toString(36).slice(2)}&user_id=${userId}`,
+      { headers: { ...getHeaders(), "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }, timeout: 12000, validateStatus: () => true }
+    );
+    if (r.status === 200) { logAction("follow", `@${username}`); return "ok"; }
+    if (r.status === 403 || r.status === 401) return "session_expired";
+    if (r.status === 429 || r.data?.spam) { console.log("   ⚠️ Rate limit hit"); return "ratelimit"; }
+    return "error";
+  } catch { return "error"; }
+}
+
+// ─── LIKE POST ────────────────────────────────────────────────────────────────
+async function likePost(mediaId) {
+  try {
+    const r = await axios.post(
+      `https://i.instagram.com/api/v1/media/${mediaId}/like/`,
+      `_uuid=${Math.random().toString(36).slice(2)}&media_id=${mediaId}&d=1`,
+      { headers: { ...getHeaders(), "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }, timeout: 12000, validateStatus: () => true }
+    );
+    if (r.status === 200) { logAction("like", `media:${mediaId}`); return "ok"; }
+    if (r.status === 403 || r.status === 401) return "session_expired";
+    if (r.status === 429) return "ratelimit";
+    return "error";
+  } catch { return "error"; }
+}
+
+// ─── COMMENT ON POST ─────────────────────────────────────────────────────────
+async function commentOnPost(mediaId, username) {
+  const text = COMMENTS[Math.floor(Math.random() * COMMENTS.length)];
+  try {
+    await axios.post(
+      `https://i.instagram.com/api/v1/media/${mediaId}/comment/`,
+      `comment_text=${encodeURIComponent(text)}&_uuid=${encodeURIComponent(Math.random().toString(36))}`,
+      {
+        headers: {
+          ...getHeaders(),
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        },
+        timeout: 10000,
+      }
+    );
+    logAction("comment", `@${username}: "${text.slice(0, 40)}"`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ─── FOLLOW FROM HASHTAG ──────────────────────────────────────────────────────
 async function followFromHashtag(hashtag, count = 15) {
-  const ig = await getIg();
-  if (!ig) return 0;
-
   const remaining = LIMITS.follows - todayCount("follow");
-  if (remaining <= 0) {
-    console.log("⏸️  Follow limit reached for today");
-    return 0;
-  }
+  if (remaining <= 0) { console.log("⏸️  Follow limit reached"); return 0; }
 
   const toFollow = Math.min(count, remaining);
+  const followLog = loadFollowLog();
+  const posts = await getHashtagPosts(hashtag);
   let followed = 0;
 
-  try {
-    console.log(`👤 Following ${toFollow} users from #${hashtag}`);
-    const feed = ig.feed.tags(hashtag);
-    const posts = await feed.items();
-    const followLog = loadFollowLog();
+  console.log(`👤 Following up to ${toFollow} from #${hashtag} (${posts.length} posts found)`);
 
-    for (const post of posts.slice(0, toFollow * 2)) {
-      if (followed >= toFollow) break;
-      const userId = post.user.pk.toString();
-      if (followLog[userId]) continue; // already followed
+  for (const post of posts) {
+    if (followed >= toFollow) break;
+    const userId = String(post.user?.pk || post.user?.id);
+    const username = post.user?.username || "unknown";
+    if (!userId || followLog[userId]) continue;
 
-      await delay(3000, 7000);
-      try {
-        await ig.friendship.create(post.user.pk);
-        followLog[userId] = { username: post.user.username, followedAt: new Date().toISOString() };
-        logAction("follow", `@${post.user.username}`);
-        followed++;
-        console.log(`   ✅ Followed @${post.user.username} (${followed}/${toFollow})`);
-      } catch (e) {
-        if (e.message?.includes("feedback_required")) {
-          console.log("   ⚠️ Instagram rate limit — pausing follows for 10min");
-          await delay(600000, 600000);
-          break;
-        }
-      }
+    await delayFollow();  // 45-90s human-like pause
+    const result = await followUser(userId, username);
+    if (result === "ok") {
+      followLog[userId] = { username, followedAt: new Date().toISOString() };
+      followed++;
+      console.log(`   ✅ Followed @${username} (${followed}/${toFollow})`);
+    } else if (result === "session_expired") {
+      console.log("   ⚠️ Session expired — run node get-session.js");
+      break;
+    } else if (result === "ratelimit") {
+      console.log("   ⏸️ Rate limit — stopping follows for this cycle");
+      break;
     }
-    saveFollowLog(followLog);
-  } catch (err) {
-    console.error("❌ Follow error:", err.message);
   }
+
+  saveFollowLog(followLog);
   return followed;
 }
 
-// ─── LIKE POSTS ON TARGET HASHTAG ────────────────────────────────────────────
+// ─── LIKE FROM HASHTAG ────────────────────────────────────────────────────────
 async function likeFromHashtag(hashtag, count = 20) {
-  const ig = await getIg();
-  if (!ig) return 0;
-
   const remaining = LIMITS.likes - todayCount("like");
   if (remaining <= 0) return 0;
 
   const toLike = Math.min(count, remaining);
+  const posts = await getHashtagPosts(hashtag);
+  if (posts.length === 0) return 0;
+
   let liked = 0;
+  console.log(`❤️  Liking up to ${toLike} posts from #${hashtag} (${posts.length} found)`);
 
-  try {
-    const feed = ig.feed.tags(hashtag);
-    const posts = await feed.items();
-    console.log(`❤️  Liking ${toLike} posts from #${hashtag}`);
-
-    for (const post of posts.slice(0, toLike)) {
-      await delay(2000, 5000);
-      try {
-        await ig.media.like({ mediaId: post.pk, moduleInfo: { module_name: "feed_timeline" } });
-        logAction("like", `#${hashtag}`);
-        liked++;
-      } catch (e) {
-        if (e.message?.includes("feedback_required")) {
-          await delay(300000, 300000);
-          break;
-        }
-      }
+  for (const post of posts.slice(0, toLike)) {
+    await delayLike();  // 8-20s human-like pause
+    const mediaId = post.pk || post.id;
+    if (!mediaId) continue;
+    const result = await likePost(mediaId);
+    if (result === "ok") {
+      liked++;
+      console.log(`   ✅ Liked @${post.user?.username} (${liked}/${toLike})`);
+    } else if (result === "session_expired") {
+      console.log("   ⚠️ Session expired during likes — run node get-session.js");
+      break;
+    } else if (result === "ratelimit") {
+      console.log("   ⏸️ Rate limit — stopping likes");
+      break;
     }
-    console.log(`   ✅ Liked ${liked} posts`);
-  } catch (err) {
-    console.error("❌ Like error:", err.message);
   }
   return liked;
 }
 
-// ─── COMMENT ON POSTS ─────────────────────────────────────────────────────────
-async function commentFromHashtag(hashtag, count = 5) {
-  const ig = await getIg();
-  if (!ig) return 0;
-
+// ─── COMMENT FROM HASHTAG ─────────────────────────────────────────────────────
+async function commentFromHashtag(hashtag, count = 4) {
   const remaining = LIMITS.comments - todayCount("comment");
   if (remaining <= 0) return 0;
 
   const toComment = Math.min(count, remaining);
+  const posts = await getHashtagPosts(hashtag);
+  if (posts.length === 0) return 0;
+
+  const active = posts.filter((p) => (p.like_count || 0) > 20).slice(0, toComment * 3);
   let commented = 0;
+  console.log(`💬 Commenting on up to ${toComment} posts from #${hashtag}`);
 
-  try {
-    const feed = ig.feed.tags(hashtag);
-    const posts = await feed.items();
-    const recentPosts = posts.filter((p) => p.like_count > 50).slice(0, toComment * 2);
-    console.log(`💬 Commenting on ${toComment} posts from #${hashtag}`);
-
-    for (const post of recentPosts) {
-      if (commented >= toComment) break;
-      const comment = COMMENTS[Math.floor(Math.random() * COMMENTS.length)];
-      await delay(10000, 20000);
-      try {
-        await ig.media.comment({ mediaId: post.pk, text: comment });
-        logAction("comment", `#${hashtag}: "${comment.slice(0, 40)}"`);
-        commented++;
-        console.log(`   ✅ Commented on post by @${post.user.username}`);
-      } catch (e) {
-        if (e.message?.includes("feedback_required")) {
-          await delay(600000, 600000);
-          break;
-        }
-      }
+  for (const post of active) {
+    if (commented >= toComment) break;
+    await delay(15000, 30000);
+    const mediaId = post.pk || post.id;
+    if (!mediaId) continue;
+    const ok = await commentOnPost(mediaId, post.user?.username);
+    if (ok) {
+      commented++;
+      console.log(`   ✅ Commented on @${post.user?.username} (${commented}/${toComment})`);
     }
-  } catch (err) {
-    console.error("❌ Comment error:", err.message);
   }
   return commented;
 }
 
-// ─── DM NEW FOLLOWERS ─────────────────────────────────────────────────────────
-async function dmNewFollowers() {
-  const ig = await getIg();
-  if (!ig) return 0;
-
-  const remaining = LIMITS.dms - todayCount("dm");
-  if (remaining <= 0) return 0;
-
-  let sent = 0;
-  try {
-    const followersResponse = await ig.feed.accountFollowers().items();
-    const followLog = loadFollowLog();
-    const dmed = new Set(
-      loadGrowthLog()
-        .filter((e) => e.type === "dm")
-        .map((e) => e.detail)
-    );
-
-    console.log(`💬 Checking new followers for DMs`);
-
-    for (const follower of followersResponse.slice(0, 30)) {
-      if (sent >= remaining) break;
-      const username = follower.username;
-      if (dmed.has(username)) continue;
-
-      await delay(5000, 12000);
-      const msg = DM_WELCOME[Math.floor(Math.random() * DM_WELCOME.length)];
-
-      try {
-        const thread = ig.entity.directThread([follower.pk.toString()]);
-        await thread.broadcastText(msg);
-        logAction("dm", username);
-        sent++;
-        console.log(`   ✅ DM sent to @${username}`);
-      } catch (e) {
-        console.log(`   ⚠️ DM failed for @${username}: ${e.message}`);
-      }
-    }
-  } catch (err) {
-    console.error("❌ DM error:", err.message);
-  }
-  return sent;
-}
-
 // ─── UNFOLLOW NON-FOLLOWERS (after 4 days) ────────────────────────────────────
 async function unfollowNonFollowers() {
-  const ig = await getIg();
-  if (!ig) return 0;
-
   const remaining = LIMITS.unfollows - todayCount("unfollow");
   if (remaining <= 0) return 0;
 
-  let unfollowed = 0;
   const followLog = loadFollowLog();
   const fourDaysAgo = Date.now() - 4 * 24 * 60 * 60 * 1000;
+  const stale = Object.entries(followLog)
+    .filter(([, d]) => new Date(d.followedAt).getTime() < fourDaysAgo && !d.unfollowedAt)
+    .slice(0, remaining);
 
-  try {
-    const followingFeed = ig.feed.accountFollowing();
-    const following = await followingFeed.items();
-    const followingIds = new Set(following.map((u) => u.pk.toString()));
-
-    const toUnfollow = Object.entries(followLog)
-      .filter(([, data]) => {
-        const followedAt = new Date(data.followedAt).getTime();
-        return followedAt < fourDaysAgo && !data.unfollowedAt;
-      })
-      .slice(0, remaining);
-
-    console.log(`🔄 Unfollowing ${toUnfollow.length} non-followers`);
-
-    for (const [userId, data] of toUnfollow) {
-      if (!followingIds.has(userId)) {
-        followLog[userId].unfollowedAt = new Date().toISOString();
-        continue;
-      }
-      await delay(3000, 7000);
-      try {
-        await ig.friendship.destroy(userId);
-        followLog[userId].unfollowedAt = new Date().toISOString();
-        logAction("unfollow", `@${data.username}`);
-        unfollowed++;
-      } catch (e) {
-        if (e.message?.includes("feedback_required")) {
-          await delay(300000, 300000);
-          break;
+  let unfollowed = 0;
+  for (const [userId, data] of stale) {
+    await delay(4000, 8000);
+    try {
+      await axios.post(
+        `https://i.instagram.com/api/v1/friendships/destroy/${userId}/`,
+        `_uuid=${encodeURIComponent(Math.random().toString(36))}&user_id=${userId}`,
+        {
+          headers: {
+            ...getHeaders(),
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          },
+          timeout: 10000,
         }
-      }
-    }
-    saveFollowLog(followLog);
-    console.log(`   ✅ Unfollowed ${unfollowed}`);
-  } catch (err) {
-    console.error("❌ Unfollow error:", err.message);
+      );
+      followLog[userId].unfollowedAt = new Date().toISOString();
+      logAction("unfollow", `@${data.username}`);
+      unfollowed++;
+      console.log(`   🔄 Unfollowed @${data.username}`);
+    } catch {}
   }
+
+  saveFollowLog(followLog);
   return unfollowed;
 }
 
-// ─── FULL DAILY GROWTH CYCLE ─────────────────────────────────────────────────
+// ─── FULL GROWTH CYCLE ────────────────────────────────────────────────────────
 async function runGrowthCycle() {
-  const ig = await getIg();
-  if (!ig) {
-    console.log("⚠️  Growth engine disabled — set IG_USERNAME + IG_PASSWORD in env vars");
+  const ok = await verifySession();
+  if (!ok) {
+    console.log("⚠️  Growth engine disabled — run: node get-session.js");
     return;
   }
 
-  console.log("\n🚀 GROWTH ENGINE CYCLE STARTED");
+  console.log("\n🚀 GROWTH ENGINE CYCLE");
   console.log("─".repeat(50));
 
-  // Pick random hashtags for this cycle
-  const tags = [...TARGET_HASHTAGS].sort(() => 0.5 - Math.random()).slice(0, 4);
+  // Pick 5 random hashtags per cycle
+  const tags = [...TARGET_HASHTAGS].sort(() => 0.5 - Math.random()).slice(0, 5);
 
   for (const tag of tags) {
-    await followFromHashtag(tag, 8);
+    await followFromHashtag(tag, 12);     // 12 follows per hashtag
     await delay(5000, 10000);
-    await likeFromHashtag(tag, 15);
+    await likeFromHashtag(tag, 20);       // 20 likes per hashtag
+    await delay(6000, 12000);
+    if (Math.random() > 0.4) await commentFromHashtag(tag, 3);  // 3 comments, 60% chance
     await delay(8000, 15000);
-    if (Math.random() > 0.5) await commentFromHashtag(tag, 2);
-    await delay(10000, 20000);
   }
 
-  await dmNewFollowers();
-  await delay(5000, 10000);
-
-  // Unfollow cycle (once per day only)
   const hour = new Date().getHours();
-  if (hour === 22) await unfollowNonFollowers();
+  if (hour >= 21) await unfollowNonFollowers();
 
+  const s = getGrowthStats().today;
   console.log("─".repeat(50));
-  console.log(`✅ Growth cycle complete | Follows today: ${todayCount("follow")} | Likes: ${todayCount("like")} | Comments: ${todayCount("comment")} | DMs: ${todayCount("dm")}`);
+  console.log(`✅ Cycle done | Follows: ${s.follows} | Likes: ${s.likes} | Comments: ${s.comments}`);
 }
 
 // ─── STATS ────────────────────────────────────────────────────────────────────
@@ -421,29 +377,33 @@ function getGrowthStats() {
   const today = new Date().toISOString().split("T")[0];
   const log = loadGrowthLog();
   const todayLog = log.filter((e) => e.timestamp.startsWith(today));
-
-  const countType = (type) => todayLog.filter((e) => e.type === type).length;
+  const count = (type) => todayLog.filter((e) => e.type === type).length;
   const followLog = loadFollowLog();
-  const totalFollowed = Object.keys(followLog).length;
-  const unfollowed = Object.values(followLog).filter((d) => d.unfollowedAt).length;
 
   return {
     today: {
-      follows: countType("follow"),
-      unfollows: countType("unfollow"),
-      likes: countType("like"),
-      comments: countType("comment"),
-      dms: countType("dm"),
+      follows: count("follow"),
+      unfollows: count("unfollow"),
+      likes: count("like"),
+      comments: count("comment"),
+      dms: count("dm"),
     },
     limits: LIMITS,
     allTime: {
-      totalFollowed,
-      totalUnfollowed: unfollowed,
+      totalFollowed: Object.keys(followLog).length,
+      totalUnfollowed: Object.values(followLog).filter((d) => d.unfollowedAt).length,
       totalActions: log.length,
     },
     recentActions: log.slice(0, 20),
-    engineEnabled: !!(process.env.IG_USERNAME && process.env.IG_PASSWORD),
+    engineEnabled: !!process.env.IG_SESSION_ID,
   };
 }
 
-module.exports = { runGrowthCycle, getGrowthStats, followFromHashtag, likeFromHashtag, commentFromHashtag, dmNewFollowers };
+module.exports = {
+  runGrowthCycle,
+  getGrowthStats,
+  followFromHashtag,
+  likeFromHashtag,
+  commentFromHashtag,
+  unfollowNonFollowers,
+};
