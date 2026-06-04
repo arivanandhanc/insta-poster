@@ -7,7 +7,13 @@
  */
 require("./dns-fix");
 require("dotenv").config();
-const puppeteer = require("puppeteer");
+let puppeteer;
+try {
+  puppeteer = require("puppeteer");
+} catch {
+  console.error("Puppeteer not installed. Run: npm install puppeteer");
+  process.exit(1);
+}
 const fs = require("fs");
 const path = require("path");
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
