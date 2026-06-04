@@ -2,4 +2,8 @@ node_modules/
 .env
 temp_images/
 post_log.json
+growth_log.json
+follow_log.json
+used_topics.json
+ig_session.json
 *.log
