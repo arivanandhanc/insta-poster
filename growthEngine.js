@@ -7,12 +7,13 @@ const path = require("path");
 // ─── DAILY ACTION LIMITS ──────────────────────────────────────────────────────
 // Instagram bans accounts for rapid automation. These limits + human-like delays
 // are the MAXIMUM you can do without triggering detection.
+// Safe limits — Instagram bans at >80 follows/day for growing accounts
 const LIMITS = {
-  follows: 150,    // 7 cycles × ~20/cycle — spaced 3min apart
-  unfollows: 100,
-  likes: 400,      // 7 cycles × ~55/cycle — spaced 45s apart
-  comments: 40,    // 7 cycles × ~5/cycle — spaced 8min apart
-  dms: 25,
+  follows: 60,     // 10 cycles × 6/cycle — very safe for new accounts
+  unfollows: 40,
+  likes: 150,      // 10 cycles × 15/cycle
+  comments: 20,    // 10 cycles × 2/cycle
+  dms: 10,
 };
 
 // ─── TARGET HASHTAGS ──────────────────────────────────────────────────────────
@@ -356,9 +357,9 @@ async function runGrowthCycle() {
   const tags = [...TARGET_HASHTAGS].sort(() => 0.5 - Math.random()).slice(0, 5);
 
   for (const tag of tags) {
-    await followFromHashtag(tag, 12);     // 12 follows per hashtag
+    await followFromHashtag(tag, 6);      // 6 follows per hashtag (safe for new accounts)
     await delay(5000, 10000);
-    await likeFromHashtag(tag, 20);       // 20 likes per hashtag
+    await likeFromHashtag(tag, 15);       // 15 likes per hashtag
     await delay(6000, 12000);
     if (Math.random() > 0.4) await commentFromHashtag(tag, 3);  // 3 comments, 60% chance
     await delay(8000, 15000);

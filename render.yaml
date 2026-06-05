@@ -20,6 +20,10 @@ services:
         sync: false
       - key: STABILITY_API_KEY
         sync: false
+      - key: DEEPAI_API_KEY
+        sync: false
+      - key: PRODIA_API_KEY
+        sync: false
       - key: IG_ACCESS_TOKEN
         sync: false
       - key: IG_BUSINESS_ACCOUNT_ID

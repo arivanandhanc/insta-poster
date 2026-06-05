@@ -12,10 +12,25 @@ function ensureDir() {
   return dir;
 }
 
+// Map topic → Unsplash/Flickr search keywords for stock photo fallbacks
+function topicToKeywords(topic = "") {
+  const t = topic.toLowerCase();
+  if (t.match(/temple|kovil|chola|pallava|dravidian|gopuram/)) return "Tamil,Nadu,temple,South,India";
+  if (t.match(/food|cuisine|dosa|idli|biryani|samayal/))       return "Tamil,Nadu,food,South,India";
+  if (t.match(/festival|pongal|diwali|karthigai|celebration/)) return "Tamil,Nadu,festival,South,India";
+  if (t.match(/war|battle|king|emperor|chera|pandya|chola/))   return "India,ancient,history,Tamil,heritage";
+  if (t.match(/dance|music|bharatanatyam|carnatic/))           return "Tamil,Nadu,dance,classical,India";
+  if (t.match(/river|lake|sea|ocean|underwater|coast/))        return "South,India,coastal,nature,water";
+  if (t.match(/village|agriculture|farmer|rural/))             return "Tamil,Nadu,village,rural,India";
+  if (t.match(/science|innovation|technology|math/))           return "India,science,innovation,heritage";
+  if (t.match(/literature|poem|sangam|thirukku/))              return "Tamil,Nadu,culture,heritage,India";
+  return "Tamil,Nadu,South,India,heritage";
+}
+
 // ── 1. HuggingFace FLUX ───────────────────────────────────────────────────────
 async function tryHuggingFace(prompt, filename) {
   if (!process.env.HF_API_KEY) return null;
-  console.log(`🎨 [1/9] HuggingFace FLUX`);
+  console.log(`🎨 [1] HuggingFace FLUX`);
   try {
     const r = await axios({
       url: HF_URL, method: "post",
@@ -23,22 +38,22 @@ async function tryHuggingFace(prompt, filename) {
       headers: { Authorization: `Bearer ${process.env.HF_API_KEY}`, "Content-Type": "application/json", Accept: "image/jpeg" },
       responseType: "arraybuffer", timeout: 90000,
     });
-    if (r.status === 503) { await wait(20000); return tryHuggingFace(prompt, filename + "_r"); }
+    if (r.data.length < 5000) throw new Error("Response too small — likely error");
     const fp = path.join(ensureDir(), `${filename}.jpg`);
     fs.writeFileSync(fp, r.data);
     console.log(`   ✅ HuggingFace OK (${r.data.length} bytes)`);
     return fp;
   } catch (e) {
     const s = Buffer.from(e.response?.data || []).toString().slice(0, 80);
-    console.log(`   ⚠️  HF failed (${e.response?.status}): ${s || e.message}`);
+    console.log(`   ⚠️  HF (${e.response?.status}): ${s || e.message}`);
     return null;
   }
 }
 
-// ── 2. Together AI — FLUX.1-schnell-Free (free signup) ───────────────────────
+// ── 2. Together AI — FLUX.1-schnell-Free ─────────────────────────────────────
 async function tryTogetherAI(prompt, filename) {
   if (!process.env.TOGETHER_API_KEY) return null;
-  console.log(`🎨 [2/9] Together AI FLUX`);
+  console.log(`🎨 [2] Together AI FLUX`);
   try {
     const r = await axios.post(
       "https://api.together.xyz/v1/images/generations",
@@ -53,15 +68,15 @@ async function tryTogetherAI(prompt, filename) {
     console.log(`   ✅ Together AI OK`);
     return fp;
   } catch (e) {
-    console.log(`   ⚠️  Together AI failed: ${e.response?.data?.error || e.message}`);
+    console.log(`   ⚠️  Together AI: ${e.response?.data?.error || e.message}`);
     return null;
   }
 }
 
-// ── 3. Stability AI (free credits on signup) ──────────────────────────────────
+// ── 3. Stability AI ───────────────────────────────────────────────────────────
 async function tryStabilityAI(prompt, filename) {
   if (!process.env.STABILITY_API_KEY) return null;
-  console.log(`🎨 [3/9] Stability AI`);
+  console.log(`🎨 [3] Stability AI`);
   try {
     const FormData = require("form-data");
     const fd = new FormData();
@@ -77,209 +92,291 @@ async function tryStabilityAI(prompt, filename) {
     console.log(`   ✅ Stability AI OK`);
     return fp;
   } catch (e) {
-    console.log(`   ⚠️  Stability AI failed: ${e.response?.status}`);
+    console.log(`   ⚠️  Stability AI: ${e.response?.status}`);
     return null;
   }
 }
 
-// ── 4-7. Pollinations (multiple models, no key needed) ────────────────────────
-async function tryPollinations(prompt, filename, model, attempt) {
-  console.log(`🎨 [${attempt}/9] Pollinations (${model})`);
+// ── 4. DeepAI text2img (free account — add DEEPAI_API_KEY) ───────────────────
+async function tryDeepAI(prompt, filename) {
+  if (!process.env.DEEPAI_API_KEY) return null;
+  console.log(`🎨 [4] DeepAI text2img`);
+  try {
+    const FormData = require("form-data");
+    const fd = new FormData();
+    fd.append("text", `Tamil Nadu South India, ${prompt.slice(0, 150)}, photorealistic, vibrant, cinematic`);
+    const r = await axios.post("https://api.deepai.org/api/text2img", fd, {
+      headers: { ...fd.getHeaders(), "api-key": process.env.DEEPAI_API_KEY },
+      timeout: 60000,
+    });
+    const imageUrl = r.data?.output_url;
+    if (!imageUrl) throw new Error("No output URL");
+    const img = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 30000 });
+    const fp = path.join(ensureDir(), `${filename}.jpg`);
+    fs.writeFileSync(fp, img.data);
+    console.log(`   ✅ DeepAI OK`);
+    return fp;
+  } catch (e) {
+    console.log(`   ⚠️  DeepAI: ${e.response?.data?.err || e.message}`);
+    return null;
+  }
+}
+
+// ── 5. Prodia SD (free account — add PRODIA_API_KEY) ─────────────────────────
+async function tryProdia(prompt, filename) {
+  if (!process.env.PRODIA_API_KEY) return null;
+  console.log(`🎨 [5] Prodia (Stable Diffusion)`);
+  try {
+    const gen = await axios.get("https://api.prodia.com/v1/sd/generate", {
+      params: { apikey: process.env.PRODIA_API_KEY, prompt: `Tamil Nadu, ${prompt.slice(0, 100)}, photorealistic, 8k, vibrant`, model: "dreamshaperXL10_alpha2.safetensors [c8afe2ef]", steps: 25, width: 1024, height: 1024 },
+      timeout: 10000,
+    });
+    const jobId = gen.data?.job;
+    if (!jobId) throw new Error("No job ID");
+    // Poll for completion
+    for (let i = 0; i < 20; i++) {
+      await wait(4000);
+      const status = await axios.get(`https://api.prodia.com/v1/job/${jobId}`, { params: { apikey: process.env.PRODIA_API_KEY }, timeout: 10000 });
+      if (status.data?.status === "succeeded") {
+        const img = await axios.get(status.data.imageUrl, { responseType: "arraybuffer", timeout: 30000 });
+        const fp = path.join(ensureDir(), `${filename}.jpg`);
+        fs.writeFileSync(fp, img.data);
+        console.log(`   ✅ Prodia OK`);
+        return fp;
+      }
+      if (status.data?.status === "failed") throw new Error("Job failed");
+    }
+    throw new Error("Timeout");
+  } catch (e) {
+    console.log(`   ⚠️  Prodia: ${e.message}`);
+    return null;
+  }
+}
+
+// ── 6. Pollinations (multiple models, simplified URL) ─────────────────────────
+async function tryPollinations(prompt, filename, model, layer) {
+  console.log(`🎨 [${layer}] Pollinations (${model})`);
+  const p    = encodeURIComponent(`Tamil Nadu, ${prompt.slice(0, 120)}, photorealistic, cinematic`);
   const seed = Math.floor(Math.random() * 999999);
-  const p = encodeURIComponent(`Tamil Nadu South India, ${prompt.slice(0, 120)}, photorealistic, cinematic, vibrant`);
-  const url = `https://image.pollinations.ai/prompt/${p}?model=${model}&width=1024&height=1024&seed=${seed}`;
-  for (let i = 0; i < 3; i++) {
+  const url  = model
+    ? `https://image.pollinations.ai/prompt/${p}?model=${model}&width=1024&height=1024&seed=${seed}`
+    : `https://image.pollinations.ai/prompt/${p}?width=1024&height=1024&seed=${seed}`;
+  for (let i = 0; i < 2; i++) {
     try {
       const r = await axios.get(url, {
         responseType: "arraybuffer", timeout: 90000,
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0" },
+        headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36" },
       });
       if (!(r.headers["content-type"] || "").includes("image")) throw new Error("Not an image");
+      if (r.data.length < 5000) throw new Error("Image too small");
       const fp = path.join(ensureDir(), `${filename}.png`);
       fs.writeFileSync(fp, r.data);
-      console.log(`   ✅ Pollinations ${model} OK`);
+      console.log(`   ✅ Pollinations ${model || "default"} OK`);
       return fp;
     } catch (e) {
-      if (i < 2) { await wait((i + 1) * 10000); continue; }
-      console.log(`   ⚠️  Pollinations ${model} failed: ${e.response?.status || e.message}`);
+      if (i === 0) { await wait(8000); continue; }
+      console.log(`   ⚠️  Pollinations ${model || "default"}: ${e.response?.status || e.message}`);
       return null;
     }
   }
   return null;
 }
 
-// ── 8. Craiyon (completely free, no account, slower) ─────────────────────────
-async function tryCraiyon(prompt, filename) {
-  console.log(`🎨 [8/9] Craiyon (free)`);
+// ── 9. Lexica.art — search existing AI images (FREE, no auth) ─────────────────
+async function tryLexica(prompt, topic, filename) {
+  console.log(`🎨 [9] Lexica.art (AI image search)`);
   try {
-    const r = await axios.post(
-      "https://backend.craiyon.com/generate",
-      { prompt: `Tamil Nadu, South India, ${prompt.slice(0, 80)}, photorealistic` },
-      { headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" }, timeout: 120000 }
-    );
+    const q = `Tamil Nadu South India ${prompt.slice(0, 60)}`;
+    const r = await axios.get(`https://lexica.art/api/v1/search?q=${encodeURIComponent(q)}`, {
+      timeout: 15000, headers: { "User-Agent": "Mozilla/5.0" },
+    });
     const images = r.data?.images;
-    if (!images?.length) throw new Error("No images");
+    if (!images?.length) throw new Error("No results");
+    const pick = images[Math.floor(Math.random() * Math.min(8, images.length))];
+    const srcUrl = pick.src || pick.srcSmall;
+    if (!srcUrl) throw new Error("No src URL");
+    const img = await axios.get(srcUrl, { responseType: "arraybuffer", timeout: 30000, headers: { "User-Agent": "Mozilla/5.0" } });
     const fp = path.join(ensureDir(), `${filename}.jpg`);
-    fs.writeFileSync(fp, Buffer.from(images[0], "base64"));
-    console.log(`   ✅ Craiyon OK`);
+    fs.writeFileSync(fp, img.data);
+    console.log(`   ✅ Lexica.art OK`);
     return fp;
   } catch (e) {
-    console.log(`   ⚠️  Craiyon failed: ${e.message}`);
+    console.log(`   ⚠️  Lexica.art: ${e.message}`);
     return null;
   }
 }
 
-// ── 9. SVG Canvas Generator — NEVER FAILS (pure JavaScript, zero deps) ────────
+// ── 10. Unsplash Source (FREE, no auth) ───────────────────────────────────────
+async function tryUnsplash(topic, filename) {
+  console.log(`🎨 [10] Unsplash (stock photos)`);
+  const kw = topicToKeywords(topic);
+  try {
+    const r = await axios.get(`https://source.unsplash.com/1080x1080/?${kw}`, {
+      responseType: "arraybuffer", timeout: 20000, maxRedirects: 10,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+    });
+    if (!(r.headers["content-type"] || "").includes("image")) throw new Error("Not an image");
+    const fp = path.join(ensureDir(), `${filename}.jpg`);
+    fs.writeFileSync(fp, r.data);
+    console.log(`   ✅ Unsplash OK`);
+    return fp;
+  } catch (e) {
+    console.log(`   ⚠️  Unsplash: ${e.response?.status || e.message}`);
+    return null;
+  }
+}
+
+// ── 11. Lorem Flickr (FREE, Flickr CC photos, no auth) ───────────────────────
+async function tryLoremFlickr(topic, filename) {
+  console.log(`🎨 [11] Lorem Flickr (CC photos)`);
+  const kw = topicToKeywords(topic).replace(/,/g, "/");
+  try {
+    const r = await axios.get(`https://loremflickr.com/1080/1080/${kw}?lock=${Math.floor(Math.random() * 99999)}`, {
+      responseType: "arraybuffer", timeout: 20000, maxRedirects: 10,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    if (!(r.headers["content-type"] || "").includes("image")) throw new Error("Not an image");
+    const fp = path.join(ensureDir(), `${filename}.jpg`);
+    fs.writeFileSync(fp, r.data);
+    console.log(`   ✅ Lorem Flickr OK`);
+    return fp;
+  } catch (e) {
+    console.log(`   ⚠️  Lorem Flickr: ${e.response?.status || e.message}`);
+    return null;
+  }
+}
+
+// ── 12. SVG Canvas — GUARANTEED (pure JS, zero internet, never fails) ─────────
 function generateSVGImage(topic, hook, filename) {
-  console.log(`🎨 [9/9] SVG Canvas (local — guaranteed)`);
+  console.log(`🎨 [12] SVG Canvas (local — guaranteed)`);
 
-  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-
-  // Word-wrap helper
-  const wrap = (text, maxChars) => {
+  const esc  = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  const wrap = (text, max) => {
     const words = String(text).split(" ");
-    const lines = [];
-    let cur = "";
+    const lines = []; let cur = "";
     for (const w of words) {
-      if ((cur + " " + w).trim().length <= maxChars) { cur = (cur + " " + w).trim(); }
+      if ((cur + " " + w).trim().length <= max) cur = (cur + " " + w).trim();
       else { if (cur) lines.push(cur); cur = w; }
     }
     if (cur) lines.push(cur);
     return lines;
   };
 
-  const hookLines  = wrap(hook  || topic, 22);
-  const topicLines = wrap(topic || hook,  32).slice(0, 3);
-
-  const hookY  = 290;
-  const topicY = hookY + hookLines.length * 80 + 80;
+  const hookLines  = wrap(hook  || topic, 20);
+  const topicLines = wrap(topic || hook,  30).slice(0, 3);
+  const hookY      = 300;
+  const topicY     = hookY + hookLines.length * 82 + 90;
 
   const hookSVG = hookLines.map((l, i) =>
-    `<text x="540" y="${hookY + i * 80}" font-family="Georgia,'Times New Roman',serif" font-size="64" font-weight="bold" fill="#FFFFFF" text-anchor="middle" dominant-baseline="middle">${esc(l)}</text>`
+    `<text x="540" y="${hookY + i * 82}" font-family="Georgia,'Times New Roman',serif" font-size="68" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${esc(l)}</text>`
   ).join("\n  ");
 
   const topicSVG = topicLines.map((l, i) =>
-    `<text x="540" y="${topicY + i * 56}" font-family="Arial,Helvetica,sans-serif" font-size="40" fill="#FFD700" text-anchor="middle" dominant-baseline="middle">${esc(l)}</text>`
+    `<text x="540" y="${topicY + i * 58}" font-family="Arial,Helvetica,sans-serif" font-size="42" fill="#FFD700" text-anchor="middle">${esc(l)}</text>`
   ).join("\n  ");
 
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="1080" height="1080" xmlns="http://www.w3.org/2000/svg">
 <defs>
   <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0%" stop-color="#120300"/>
-    <stop offset="45%" stop-color="#2a0800"/>
-    <stop offset="100%" stop-color="#060606"/>
+    <stop offset="0%" stop-color="#110200"/>
+    <stop offset="40%" stop-color="#2a0700"/>
+    <stop offset="100%" stop-color="#040404"/>
   </linearGradient>
   <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
     <stop offset="0%" stop-color="#FF6B00" stop-opacity="0"/>
-    <stop offset="30%" stop-color="#FF6B00"/>
-    <stop offset="70%" stop-color="#FF6B00"/>
+    <stop offset="25%" stop-color="#FF6B00"/>
+    <stop offset="75%" stop-color="#FF6B00"/>
     <stop offset="100%" stop-color="#FF6B00" stop-opacity="0"/>
   </linearGradient>
   <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
     <stop offset="0%" stop-color="#FFD700" stop-opacity="0"/>
-    <stop offset="30%" stop-color="#FFD700"/>
-    <stop offset="70%" stop-color="#FFD700"/>
+    <stop offset="25%" stop-color="#FFD700"/>
+    <stop offset="75%" stop-color="#FFD700"/>
     <stop offset="100%" stop-color="#FFD700" stop-opacity="0"/>
   </linearGradient>
-  <radialGradient id="glow" cx="50%" cy="50%" r="50%">
-    <stop offset="0%" stop-color="#FF6B00" stop-opacity="0.15"/>
-    <stop offset="100%" stop-color="#FF6B00" stop-opacity="0"/>
+  <radialGradient id="glow" cx="50%" cy="40%" r="55%">
+    <stop offset="0%" stop-color="#CC3300" stop-opacity="0.25"/>
+    <stop offset="100%" stop-color="#CC3300" stop-opacity="0"/>
   </radialGradient>
 </defs>
-
-<!-- Background -->
 <rect width="1080" height="1080" fill="url(#bg)"/>
 <rect width="1080" height="1080" fill="url(#glow)"/>
-
-<!-- Outer border double -->
 <rect x="12" y="12" width="1056" height="1056" fill="none" stroke="#FF6B00" stroke-width="3"/>
-<rect x="20" y="20" width="1040" height="1040" fill="none" stroke="#FF6B00" stroke-width="1" stroke-dasharray="10,6" opacity="0.6"/>
-
-<!-- Corner accents -->
-<polyline points="12,80 12,12 80,12"  fill="none" stroke="#FFD700" stroke-width="5"/>
-<polyline points="1000,12 1068,12 1068,80" fill="none" stroke="#FFD700" stroke-width="5"/>
-<polyline points="12,1000 12,1068 80,1068" fill="none" stroke="#FFD700" stroke-width="5"/>
-<polyline points="1000,1068 1068,1068 1068,1000" fill="none" stroke="#FFD700" stroke-width="5"/>
-
-<!-- Header band -->
-<rect x="12" y="12" width="1056" height="105" fill="#FF6B00" fill-opacity="0.18"/>
-
-<!-- Account name -->
-<text x="540" y="75" font-family="Arial,Helvetica,sans-serif" font-size="34" font-weight="bold" fill="#FF6B00" text-anchor="middle" letter-spacing="4">TAMILNADU UNFILTERED</text>
-
-<!-- Header separator -->
-<rect x="60" y="118" width="960" height="2.5" fill="url(#fade)"/>
-<circle cx="60" cy="119" r="5" fill="#FF6B00"/>
-<circle cx="1020" cy="119" r="5" fill="#FF6B00"/>
-
-<!-- Hook text (large white bold) -->
+<rect x="20" y="20" width="1040" height="1040" fill="none" stroke="#FF6B00" stroke-width="1" stroke-dasharray="12,7" opacity="0.5"/>
+<polyline points="12,80 12,12 80,12"    fill="none" stroke="#FFD700" stroke-width="6"/>
+<polyline points="1000,12 1068,12 1068,80"  fill="none" stroke="#FFD700" stroke-width="6"/>
+<polyline points="12,1000 12,1068 80,1068"  fill="none" stroke="#FFD700" stroke-width="6"/>
+<polyline points="1000,1068 1068,1068 1068,1000" fill="none" stroke="#FFD700" stroke-width="6"/>
+<rect x="12" y="12" width="1056" height="108" fill="#FF6B00" fill-opacity="0.18"/>
+<text x="540" y="78" font-family="Arial,Helvetica,sans-serif" font-size="32" font-weight="bold" fill="#FF6B00" text-anchor="middle" letter-spacing="5">TAMILNADU UNFILTERED</text>
+<rect x="60" y="122" width="960" height="2.5" fill="url(#fade)"/>
+<circle cx="60" cy="123" r="5" fill="#FF6B00"/>
+<circle cx="1020" cy="123" r="5" fill="#FF6B00"/>
 ${hookSVG}
-
-<!-- Divider between hook and topic -->
-<rect x="180" y="${topicY - 45}" width="720" height="2" fill="url(#gold)"/>
-
-<!-- Topic text (golden) -->
+<rect x="160" y="${topicY - 48}" width="760" height="2" fill="url(#gold)"/>
 ${topicSVG}
-
-<!-- Bottom separator -->
-<rect x="60" y="940" width="960" height="2.5" fill="url(#fade)"/>
-<circle cx="60" cy="941" r="5" fill="#FF6B00"/>
-<circle cx="1020" cy="941" r="5" fill="#FF6B00"/>
-
-<!-- Footer band -->
-<rect x="12" y="950" width="1056" height="118" fill="#FF6B00" fill-opacity="0.10"/>
-
-<!-- Hashtags -->
-<text x="540" y="992" font-family="Arial,Helvetica,sans-serif" font-size="24" fill="#FF6B00" text-anchor="middle">#TamilHistory #TamilCulture #TamilNadu #TamilPride</text>
-<text x="540" y="1040" font-family="Arial,Helvetica,sans-serif" font-size="20" fill="#888" text-anchor="middle">Follow for daily Tamil heritage stories</text>
+<rect x="60" y="942" width="960" height="2.5" fill="url(#fade)"/>
+<circle cx="60" cy="943" r="5" fill="#FF6B00"/>
+<circle cx="1020" cy="943" r="5" fill="#FF6B00"/>
+<rect x="12" y="952" width="1056" height="116" fill="#FF6B00" fill-opacity="0.10"/>
+<text x="540" y="994" font-family="Arial,Helvetica,sans-serif" font-size="24" fill="#FF6B00" text-anchor="middle">#TamilHistory #TamilCulture #TamilNadu #TamilPride</text>
+<text x="540" y="1042" font-family="Arial,Helvetica,sans-serif" font-size="20" fill="#888" text-anchor="middle">Follow for daily Tamil heritage stories</text>
 </svg>`;
 
   try {
     const { Resvg } = require("@resvg/resvg-js");
-    const resvg = new Resvg(svg, { fitTo: { mode: "width", value: 1080 } });
-    const pngData = resvg.render().asPng();
+    const pngData = new Resvg(svg, { fitTo: { mode: "width", value: 1080 } }).render().asPng();
     const fp = path.join(ensureDir(), `${filename}_canvas.png`);
     fs.writeFileSync(fp, pngData);
-    console.log(`   ✅ SVG canvas image generated (${pngData.length} bytes)`);
+    console.log(`   ✅ SVG canvas OK (${pngData.length} bytes)`);
     return fp;
   } catch (e) {
-    // Ultra-last resort: save the SVG itself (some hosts accept SVG)
-    console.log(`   ⚠️  resvg failed (${e.message}) — saving SVG directly`);
     const fp = path.join(ensureDir(), `${filename}_canvas.svg`);
     fs.writeFileSync(fp, svg);
     return fp;
   }
 }
 
-// ── MASTER PIPELINE — tries all 9 providers in order ──────────────────────────
+// ── MASTER PIPELINE — 12 layers, never fails ──────────────────────────────────
 async function smartGenerateImage(imagePrompt, filename, { topic = "", hook = "" } = {}) {
-  const r1 = await tryHuggingFace(imagePrompt, filename);
+  const p = imagePrompt || topic;
+
+  const r1 = await tryHuggingFace(p, filename);
   if (r1) return r1;
 
-  const r2 = await tryTogetherAI(imagePrompt, filename + "_t");
+  const r2 = await tryTogetherAI(p, filename + "_tog");
   if (r2) return r2;
 
-  const r3 = await tryStabilityAI(imagePrompt, filename + "_s");
+  const r3 = await tryStabilityAI(p, filename + "_stab");
   if (r3) return r3;
 
-  const r4 = await tryPollinations(imagePrompt, filename + "_p1", "flux", 4);
+  const r4 = await tryDeepAI(p, filename + "_dap");
   if (r4) return r4;
 
-  const r5 = await tryPollinations(imagePrompt, filename + "_p2", "flux-realism", 5);
+  const r5 = await tryProdia(p, filename + "_pro");
   if (r5) return r5;
 
-  const r6 = await tryPollinations(imagePrompt, filename + "_p3", "turbo", 6);
+  const r6 = await tryPollinations(p, filename + "_pol1", null, 6);
   if (r6) return r6;
 
-  const r7 = await tryPollinations(imagePrompt, filename + "_p4", "dreamshaper", 7);
+  const r7 = await tryPollinations(p, filename + "_pol2", "flux", 7);
   if (r7) return r7;
 
-  const r8 = await tryCraiyon(imagePrompt, filename + "_cr");
+  const r8 = await tryPollinations(p, filename + "_pol3", "turbo", 8);
   if (r8) return r8;
 
-  // Layer 9: LOCAL SVG — GUARANTEED, needs no internet
-  return generateSVGImage(topic || imagePrompt, hook || imagePrompt, filename);
+  const r9 = await tryLexica(p, topic, filename + "_lex");
+  if (r9) return r9;
+
+  const r10 = await tryUnsplash(topic || p, filename + "_uns");
+  if (r10) return r10;
+
+  const r11 = await tryLoremFlickr(topic || p, filename + "_flk");
+  if (r11) return r11;
+
+  // Layer 12 — GUARANTEED
+  return generateSVGImage(topic || p, hook || p, filename);
 }
 
 function cleanupImage(filePath) {
