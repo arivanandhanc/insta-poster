@@ -2,6 +2,7 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const FormData = require("form-data");
+const { postViaPrivateAPI } = require("./instagramPrivatePoster");
 
 const IG_BASE = "https://graph.instagram.com/v21.0";
 const FB_BASE = "https://graph.facebook.com/v21.0";
@@ -140,43 +141,51 @@ async function getPostInsights(postId) {
 async function postToInstagram(imagePath, caption) {
   console.log("\n📸 Starting Instagram post workflow...");
 
-  // Quick token check before wasting time on image upload
+  // ── Try Method 1: Official Facebook Graph API ─────────────────────────────
+  let graphApiOk = false;
   try {
     await axios.get(`${FB_BASE}/${process.env.IG_BUSINESS_ACCOUNT_ID}`, {
       params: { fields: "id", access_token: process.env.IG_ACCESS_TOKEN },
       timeout: 8000,
     });
+    graphApiOk = true;
   } catch (e) {
-    if (e.response?.data?.error?.code === 190) {
-      console.error("\n❌ Instagram Access Token EXPIRED.");
-      console.error("   Get a new token at: developers.facebook.com/tools/explorer");
-      console.error("   Then update IG_ACCESS_TOKEN in Render environment variables.");
-      return { success: false, error: "ACCESS_TOKEN_EXPIRED" };
+    const code = e.response?.data?.error?.code;
+    const msg  = e.response?.data?.error?.message || "";
+    if (code === 190) {
+      console.log("⚠️  Graph API: Access token expired — falling back to private API");
+    } else if (msg.includes("blocked") || code === 200) {
+      console.log("⚠️  Graph API: Access blocked — falling back to private API");
+    } else {
+      console.log(`⚠️  Graph API check failed (${code}): ${msg.slice(0, 60)} — falling back`);
     }
   }
 
-  try {
-    // Step 1: Upload image to public host
-    const imageUrl = await uploadImageToHost(imagePath);
-
-    // Step 2: Create container
-    const containerId = await createMediaContainer(imageUrl, caption);
-
-    // Step 3: Wait for processing
-    await waitForContainer(containerId);
-
-    // Step 4: Publish
-    const postId = await publishContainer(containerId);
-
-    console.log(`\n🎉 Successfully posted to Instagram!`);
-    console.log(`   Post ID: ${postId}`);
-    console.log(`   View at: https://www.instagram.com/p/${postId}/`);
-
-    return { success: true, postId, imageUrl };
-  } catch (err) {
-    console.error(`\n❌ Instagram posting failed: ${err.message}`);
-    return { success: false, error: err.message };
+  if (graphApiOk) {
+    try {
+      const imageUrl    = await uploadImageToHost(imagePath);
+      const containerId = await createMediaContainer(imageUrl, caption);
+      await waitForContainer(containerId);
+      const postId = await publishContainer(containerId);
+      console.log(`\n🎉 Posted via Graph API! Post ID: ${postId}`);
+      return { success: true, postId, imageUrl };
+    } catch (err) {
+      const msg = err.message || "";
+      if (msg.includes("blocked") || msg.includes("400")) {
+        console.log("⚠️  Graph API post failed — falling back to private API");
+      } else {
+        console.error(`\n❌ Graph API posting failed: ${msg}`);
+      }
+    }
   }
+
+  // ── Try Method 2: Instagram Private API (session-based) ──────────────────
+  console.log("📱 Attempting private API (session-based)...");
+  const privateResult = await postViaPrivateAPI(imagePath, caption);
+  if (privateResult.success) return privateResult;
+
+  // Both methods failed
+  return { success: false, error: `Graph API blocked + Private API: ${privateResult.error}` };
 }
 
 // ─── GET ACCOUNT STATS ────────────────────────────────────────────────────────

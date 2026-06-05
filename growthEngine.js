@@ -400,6 +400,23 @@ function getGrowthStats() {
   };
 }
 
+// ─── SESSION KEEP-ALIVE ───────────────────────────────────────────────────────
+// Ping Instagram every 20 min to keep the session warm and prevent expiry.
+// Light endpoint — no actions, just a profile view.
+async function keepSessionAlive() {
+  if (!process.env.IG_SESSION_ID) return;
+  try {
+    await axios.get(
+      "https://i.instagram.com/api/v1/accounts/current_user/?edit=true",
+      { headers: getHeaders(), timeout: 10000 }
+    );
+  } catch {}
+}
+
+function startSessionKeepAlive() {
+  setInterval(keepSessionAlive, 20 * 60 * 1000); // every 20 minutes
+}
+
 module.exports = {
   runGrowthCycle,
   getGrowthStats,
@@ -408,4 +425,5 @@ module.exports = {
   likeFromHashtag,
   commentFromHashtag,
   unfollowNonFollowers,
+  startSessionKeepAlive,
 };

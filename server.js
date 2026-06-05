@@ -6,7 +6,7 @@ const path = require("path");
 const { runPostPipeline, startScheduler, loadLog } = require("./scheduler");
 const { generateCaption, generateReelScript, generateCarousel, generateBulkIdeas, getRandomTopic, CONTENT_TOPICS, ALL_TOPICS } = require("./contentGenerator");
 const { getAccountStats } = require("./instagramPoster");
-const { runGrowthCycle, getGrowthStats, followFromHashtag, likeFromHashtag, commentFromHashtag } = require("./growthEngine");
+const { runGrowthCycle, getGrowthStats, followFromHashtag, likeFromHashtag, commentFromHashtag, startSessionKeepAlive } = require("./growthEngine");
 const { refreshToken, checkTokenExpiry } = require("./tokenRefresh");
 
 const app = express();
@@ -656,6 +656,8 @@ app.get("/api/token-status", async (req, res) => {
 
 // ─── START ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
+
+startSessionKeepAlive(); // ping Instagram every 20 min to keep session alive
 
 app.listen(PORT, () => {
   console.log(`
