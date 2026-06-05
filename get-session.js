@@ -43,19 +43,29 @@ async function extractSession() {
     timeout: 30000,
   });
 
-  console.log("⏳ Waiting for you to log in... (up to 3 minutes)");
-  console.log("   In the browser: click 'Continue with Facebook' → log in → wait for Instagram home\n");
+  console.log("⏳ Waiting for you to log in... (up to 8 minutes)");
+  console.log("   In the browser:");
+  console.log("   1. Click 'Continue with Facebook' (or log in directly)");
+  console.log("   2. If a verification code is asked → check your phone/email and enter it");
+  console.log("   3. Wait for Instagram home feed to load\n");
 
-  // Poll every 2 seconds for up to 5 minutes
+  // Poll every 2 seconds for up to 8 minutes
   let sessionId = null;
-  for (let i = 0; i < 150; i++) {
+  for (let i = 0; i < 240; i++) {
     await wait(2000);
 
     const url = page.url();
     const cookies = await page.cookies("https://www.instagram.com");
     const sid = cookies.find((c) => c.name === "sessionid")?.value;
 
-    if (sid && url.includes("instagram.com") && !url.includes("login") && !url.includes("challenge")) {
+    const onVerificationStep = url.includes("codeentry") || url.includes("auth_platform") ||
+      url.includes("challenge") || url.includes("checkpoint") || url.includes("two_factor");
+
+    if (onVerificationStep && i === 10) {
+      console.log("   📱 Verification code required — check your phone/email and enter the code in the browser");
+    }
+
+    if (sid && url.includes("instagram.com") && !url.includes("login") && !onVerificationStep) {
       sessionId = sid;
       console.log("✅ Logged in! Session captured.");
       break;
