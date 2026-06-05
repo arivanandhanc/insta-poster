@@ -14,12 +14,14 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "axios": "^1.17.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "form-data": "^4.0.5",
     "groq-sdk": "^1.2.1",
-    "node-cron": "^4.2.1"
+    "node-cron": "^4.2.1",
+    "puppeteer": "^24.43.1"
   }
 }
