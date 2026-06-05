@@ -16,6 +16,10 @@ services:
         sync: false
       - key: HF_API_KEY
         sync: false
+      - key: TOGETHER_API_KEY
+        sync: false
+      - key: STABILITY_API_KEY
+        sync: false
       - key: IG_ACCESS_TOKEN
         sync: false
       - key: IG_BUSINESS_ACCOUNT_ID
@@ -25,4 +29,12 @@ services:
       - key: IG_SESSION_ID
         sync: false
       - key: IG_CSRF_TOKEN
+        sync: false
+      - key: FB_APP_ID
+        sync: false
+      - key: FB_APP_SECRET
+        sync: false
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_SERVICE_ID
         sync: false

@@ -7,6 +7,7 @@ const { runPostPipeline, startScheduler, loadLog } = require("./scheduler");
 const { generateCaption, generateReelScript, generateCarousel, generateBulkIdeas, getRandomTopic, CONTENT_TOPICS, ALL_TOPICS } = require("./contentGenerator");
 const { getAccountStats } = require("./instagramPoster");
 const { runGrowthCycle, getGrowthStats, followFromHashtag, likeFromHashtag, commentFromHashtag } = require("./growthEngine");
+const { refreshToken, checkTokenExpiry } = require("./tokenRefresh");
 
 const app = express();
 app.use(cors());
@@ -561,6 +562,24 @@ app.post("/api/refresh-token", (req, res) => {
   if (!token || token.length < 20) return res.status(400).json({ error: "Invalid token" });
   process.env.IG_ACCESS_TOKEN = token;
   res.json({ success: true, message: "Token updated in memory. Also update Render env var IG_ACCESS_TOKEN." });
+});
+
+// Auto-refresh using FB app credentials (requires FB_APP_ID + FB_APP_SECRET in env)
+app.get("/api/force-refresh-token", async (req, res) => {
+  const ok = await refreshToken();
+  if (ok) {
+    res.json({ success: true, message: "Token refreshed and Render env var updated (if RENDER_API_KEY is set)." });
+  } else {
+    res.json({ success: false, message: "Refresh failed — check FB_APP_ID + FB_APP_SECRET are set in Render env vars." });
+  }
+});
+
+app.get("/api/token-expiry", async (req, res) => {
+  const info = await checkTokenExpiry();
+  if (!info) {
+    return res.json({ checked: false, reason: "FB_APP_ID or FB_APP_SECRET not set — add them to Render env vars to enable expiry checking" });
+  }
+  res.json({ checked: true, ...info });
 });
 
 app.get("/api/token-status", async (req, res) => {

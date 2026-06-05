@@ -6,6 +6,7 @@ const { generateCaption, getNextTopic } = require("./contentGenerator");
 const { smartGenerateImage, cleanupImage } = require("./imageGenerator");
 const { postToInstagram } = require("./instagramPoster");
 const { runGrowthCycle } = require("./growthEngine");
+const { scheduleTokenRefresh, refreshToken } = require("./tokenRefresh");
 
 // ─── POST LOG ─────────────────────────────────────────────────────────────────
 const LOG_FILE = path.join(__dirname, "post_log.json");
@@ -161,6 +162,9 @@ function startScheduler() {
   } else {
     console.log("\n⚠️  Growth engine disabled — add IG_USERNAME + IG_PASSWORD to env vars");
   }
+
+  // Token auto-refresh (1st & 16th of each month)
+  scheduleTokenRefresh();
 
   console.log("─".repeat(60));
 }
