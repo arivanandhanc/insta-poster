@@ -182,6 +182,112 @@ async function tryPollinations(prompt, filename, model, layer) {
   return null;
 }
 
+// ── 6b. Replicate — open-source SDXL/FLUX (free credits on signup) ───────────
+async function tryReplicate(prompt, filename) {
+  if (!process.env.REPLICATE_API_TOKEN) return null;
+  console.log(`🎨 [6b] Replicate (SDXL)`);
+  try {
+    const r1 = await axios.post(
+      "https://api.replicate.com/v1/models/stability-ai/sdxl/predictions",
+      { input: { prompt: `Tamil Nadu, South India, ${prompt.slice(0, 150)}, photorealistic, cinematic, vibrant, 8k`, width: 1024, height: 1024, num_outputs: 1 } },
+      { headers: { Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}`, "Content-Type": "application/json" }, timeout: 15000 }
+    );
+    const predId = r1.data.id;
+    if (!predId) throw new Error("No prediction ID");
+    for (let i = 0; i < 30; i++) {
+      await wait(3000);
+      const poll = await axios.get(`https://api.replicate.com/v1/predictions/${predId}`, {
+        headers: { Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}` }, timeout: 10000,
+      });
+      if (poll.data.status === "succeeded") {
+        const imgUrl = poll.data.output?.[0];
+        if (!imgUrl) throw new Error("No output URL");
+        const img = await axios.get(imgUrl, { responseType: "arraybuffer", timeout: 30000 });
+        const fp = path.join(ensureDir(), `${filename}.jpg`);
+        fs.writeFileSync(fp, img.data);
+        console.log(`   ✅ Replicate OK`);
+        return fp;
+      }
+      if (poll.data.status === "failed") throw new Error("Prediction failed");
+    }
+    throw new Error("Timeout");
+  } catch (e) {
+    console.log(`   ⚠️  Replicate: ${e.response?.data?.detail || e.message}`);
+    return null;
+  }
+}
+
+// ── 6c. Fal.ai — fast FLUX (free credits on signup) ──────────────────────────
+async function tryFalAI(prompt, filename) {
+  if (!process.env.FAL_KEY) return null;
+  console.log(`🎨 [6c] Fal.ai (FLUX)`);
+  try {
+    const r = await axios.post(
+      "https://fal.run/fal-ai/flux/schnell",
+      { prompt: `Tamil Nadu, South India, ${prompt.slice(0, 150)}, photorealistic, cinematic`, image_size: "square_hd", num_images: 1, num_inference_steps: 4 },
+      { headers: { Authorization: `Key ${process.env.FAL_KEY}`, "Content-Type": "application/json" }, timeout: 60000 }
+    );
+    const imgUrl = r.data?.images?.[0]?.url;
+    if (!imgUrl) throw new Error("No image URL");
+    const img = await axios.get(imgUrl, { responseType: "arraybuffer", timeout: 30000 });
+    const fp = path.join(ensureDir(), `${filename}.jpg`);
+    fs.writeFileSync(fp, img.data);
+    console.log(`   ✅ Fal.ai OK`);
+    return fp;
+  } catch (e) {
+    console.log(`   ⚠️  Fal.ai: ${e.response?.data?.detail || e.message}`);
+    return null;
+  }
+}
+
+// ── 6d. Pexels — high-quality stock photos (free API key) ─────────────────────
+async function tryPexels(topic, filename) {
+  if (!process.env.PEXELS_API_KEY) return null;
+  console.log(`🎨 [6d] Pexels (stock photos)`);
+  const kw = topicToKeywords(topic).replace(/,/g, " ");
+  try {
+    const r = await axios.get(`https://api.pexels.com/v1/search?query=${encodeURIComponent(kw)}&per_page=15&orientation=square`, {
+      headers: { Authorization: process.env.PEXELS_API_KEY }, timeout: 15000,
+    });
+    const photos = r.data?.photos;
+    if (!photos?.length) throw new Error("No results");
+    const pick = photos[Math.floor(Math.random() * Math.min(8, photos.length))];
+    const imgUrl = pick.src?.large2x || pick.src?.large;
+    const img = await axios.get(imgUrl, { responseType: "arraybuffer", timeout: 30000 });
+    const fp = path.join(ensureDir(), `${filename}.jpg`);
+    fs.writeFileSync(fp, img.data);
+    console.log(`   ✅ Pexels OK`);
+    return fp;
+  } catch (e) {
+    console.log(`   ⚠️  Pexels: ${e.message}`);
+    return null;
+  }
+}
+
+// ── 6e. Pixabay — free images (free API key, no attribution needed) ───────────
+async function tryPixabay(topic, filename) {
+  if (!process.env.PIXABAY_API_KEY) return null;
+  console.log(`🎨 [6e] Pixabay (stock photos)`);
+  const kw = topicToKeywords(topic).replace(/,/g, "+");
+  try {
+    const r = await axios.get(`https://pixabay.com/api/?key=${process.env.PIXABAY_API_KEY}&q=${encodeURIComponent(kw)}&image_type=photo&orientation=vertical&min_width=1000&per_page=20`, {
+      timeout: 15000,
+    });
+    const hits = r.data?.hits;
+    if (!hits?.length) throw new Error("No results");
+    const pick = hits[Math.floor(Math.random() * Math.min(8, hits.length))];
+    const imgUrl = pick.largeImageURL;
+    const img = await axios.get(imgUrl, { responseType: "arraybuffer", timeout: 30000 });
+    const fp = path.join(ensureDir(), `${filename}.jpg`);
+    fs.writeFileSync(fp, img.data);
+    console.log(`   ✅ Pixabay OK`);
+    return fp;
+  } catch (e) {
+    console.log(`   ⚠️  Pixabay: ${e.message}`);
+    return null;
+  }
+}
+
 // ── 9. Lexica.art — search existing AI images (FREE, no auth) ─────────────────
 async function tryLexica(prompt, topic, filename) {
   console.log(`🎨 [9] Lexica.art (AI image search)`);
@@ -357,13 +463,25 @@ async function smartGenerateImage(imagePrompt, filename, { topic = "", hook = ""
   const r5 = await tryProdia(p, filename + "_pro");
   if (r5) return r5;
 
-  const r6 = await tryPollinations(p, filename + "_pol1", null, 6);
+  const r6b = await tryReplicate(p, filename + "_rep");
+  if (r6b) return r6b;
+
+  const r6c = await tryFalAI(p, filename + "_fal");
+  if (r6c) return r6c;
+
+  const r6d = await tryPexels(topic || p, filename + "_pex");
+  if (r6d) return r6d;
+
+  const r6e = await tryPixabay(topic || p, filename + "_pix");
+  if (r6e) return r6e;
+
+  const r6 = await tryPollinations(p, filename + "_pol1", null, "6f");
   if (r6) return r6;
 
-  const r7 = await tryPollinations(p, filename + "_pol2", "flux", 7);
+  const r7 = await tryPollinations(p, filename + "_pol2", "flux", "6g");
   if (r7) return r7;
 
-  const r8 = await tryPollinations(p, filename + "_pol3", "turbo", 8);
+  const r8 = await tryPollinations(p, filename + "_pol3", "turbo", "6h");
   if (r8) return r8;
 
   const r9 = await tryLexica(p, topic, filename + "_lex");

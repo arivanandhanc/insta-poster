@@ -556,6 +556,65 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
+// ─── FACEBOOK OAUTH FLOW (proper token generation via our own app) ───────────
+// Step 1: user visits /oauth/start → redirected to Facebook login
+// Step 2: Facebook redirects back to /oauth/callback?code=XXX
+// Step 3: code exchanged for long-lived token → saved to Render + memory
+const OAUTH_SCOPES = "instagram_basic,instagram_content_publish,pages_manage_posts,pages_read_engagement,pages_show_list,business_management";
+const RENDER_BASE  = process.env.RENDER_EXTERNAL_URL || "https://insta-poster-9aki.onrender.com";
+const REDIRECT_URI = `${RENDER_BASE}/oauth/callback`;
+
+app.get("/oauth/start", (req, res) => {
+  const url = `https://www.facebook.com/v21.0/dialog/oauth?client_id=${process.env.FB_APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=${OAUTH_SCOPES}&response_type=code`;
+  res.redirect(url);
+});
+
+app.get("/oauth/callback", async (req, res) => {
+  const { code, error } = req.query;
+  if (error || !code) return res.send(`<h2>❌ OAuth error: ${error || "no code"}</h2>`);
+
+  try {
+    const axios = require("axios");
+    // Exchange code → short-lived token
+    const r1 = await axios.get("https://graph.facebook.com/v21.0/oauth/access_token", {
+      params: { client_id: process.env.FB_APP_ID, redirect_uri: REDIRECT_URI, client_secret: process.env.FB_APP_SECRET, code },
+    });
+    const shortToken = r1.data.access_token;
+
+    // Exchange short-lived → long-lived (60 days)
+    const r2 = await axios.get("https://graph.facebook.com/v21.0/oauth/access_token", {
+      params: { grant_type: "fb_exchange_token", client_id: process.env.FB_APP_ID, client_secret: process.env.FB_APP_SECRET, fb_exchange_token: shortToken },
+    });
+    const longToken = r2.data.access_token;
+
+    // Verify token works
+    const r3 = await axios.get(`https://graph.facebook.com/v21.0/${process.env.IG_BUSINESS_ACCOUNT_ID}`, {
+      params: { fields: "username,followers_count", access_token: longToken },
+    });
+
+    // Save to memory
+    process.env.IG_ACCESS_TOKEN = longToken;
+
+    // Save to Render env vars
+    const { updateRenderEnvVar } = require("./tokenRefresh");
+    await updateRenderEnvVar("IG_ACCESS_TOKEN", longToken);
+
+    res.send(`<!DOCTYPE html><html><body style="font-family:Arial;background:#0a0a0a;color:#f0f0f0;padding:2rem;text-align:center">
+      <h1 style="color:#FF6B00">✅ Token Generated Successfully!</h1>
+      <p>Instagram account: <strong>@${r3.data.username}</strong> (${r3.data.followers_count} followers)</p>
+      <p style="color:#4CAF50">Long-lived token saved. Posts will resume immediately.</p>
+      <p style="color:#aaa;font-size:0.8rem">Token valid for 60 days. Auto-refreshes on 1st &amp; 16th of each month.</p>
+      <a href="/" style="color:#FF6B00">← Back to Dashboard</a>
+    </body></html>`);
+
+    console.log(`✅ OAuth token generated for @${r3.data.username} — posts active`);
+  } catch (e) {
+    const detail = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+    res.send(`<h2 style="color:red">❌ Token exchange failed</h2><pre>${detail}</pre><p><a href="/oauth/start">Try again</a></p>`);
+    console.error("OAuth callback error:", detail);
+  }
+});
+
 // ─── TOKEN REFRESH ───────────────────────────────────────────────────────────
 app.post("/api/refresh-token", (req, res) => {
   const { token } = req.body;
