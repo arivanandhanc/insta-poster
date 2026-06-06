@@ -16,6 +16,7 @@ const wait     = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const FB_EMAIL       = process.env.FB_EMAIL           || "";
 const FB_PASS        = process.env.FB_PASSWORD        || "";
+const GMAIL_USER     = process.env.GMAIL_USER         || FB_EMAIL; // inbox to read verification codes from
 const GMAIL_APP_PASS = (process.env.GMAIL_APP_PASSWORD || "").replace(/\s/g, "");
 const RENDER_API_KEY = process.env.RENDER_API_KEY;
 const RENDER_SVC_ID  = process.env.RENDER_SERVICE_ID;
@@ -30,7 +31,7 @@ async function getVerificationCode(timeout = 120000) {
     host:   "imap.gmail.com",
     port:   993,
     secure: true,
-    auth: { user: FB_EMAIL, pass: GMAIL_APP_PASS },
+    auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS },
     logger: false,
   });
 
