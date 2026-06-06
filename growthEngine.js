@@ -342,6 +342,83 @@ async function unfollowNonFollowers() {
   return unfollowed;
 }
 
+// ─── GET OWN USER ID ──────────────────────────────────────────────────────────
+async function getOwnUserId() {
+  if (process.env.IG_USER_ID) return process.env.IG_USER_ID;
+  try {
+    const r = await axios.get("https://i.instagram.com/api/v1/accounts/current_user/?edit=true", { headers: getHeaders(), timeout: 10000 });
+    const uid = String(r.data?.user?.pk || "");
+    if (uid) process.env.IG_USER_ID = uid;
+    return uid;
+  } catch { return ""; }
+}
+
+// ─── GET OWN FOLLOWERS (paginated) ────────────────────────────────────────────
+async function getOwnFollowers(maxCount = 100) {
+  const userId = await getOwnUserId();
+  if (!userId) return [];
+  const out = [];
+  let maxId = "";
+  while (out.length < maxCount) {
+    try {
+      const url = `https://i.instagram.com/api/v1/friendships/${userId}/followers/?count=50${maxId ? `&max_id=${maxId}` : ""}`;
+      const r = await axios.get(url, { headers: getHeaders(), timeout: 12000, validateStatus: () => true });
+      if (r.status !== 200) break;
+      const users = r.data?.users || [];
+      for (const u of users) out.push({ pk: String(u.pk), username: u.username });
+      maxId = r.data?.next_max_id;
+      if (!maxId || users.length === 0) break;
+      await delay(2000, 4000);
+    } catch { break; }
+  }
+  return out.slice(0, maxCount);
+}
+
+// ─── FOLLOW BACK — follow accounts that follow you but you don't follow yet ────
+async function followBack(max = 20) {
+  const ok = await verifySession();
+  if (!ok) { console.log("⚠️  Session invalid — run node get-session.js"); return 0; }
+
+  const remaining = LIMITS.follows - todayCount("follow");
+  if (remaining <= 0) { console.log("⏸️  Daily follow limit reached"); return 0; }
+  const target = Math.min(max, remaining);
+
+  const followLog = loadFollowLog();
+  const followers = await getOwnFollowers(Math.max(100, target * 4));
+  console.log(`🔁 Follow-back: ${followers.length} followers found, following up to ${target} new ones`);
+
+  let followed = 0;
+  for (const f of followers) {
+    if (followed >= target) break;
+    if (!f.pk || followLog[f.pk]) continue; // already followed before
+    await delayFollow();
+    const result = await followUser(f.pk, f.username);
+    if (result === "ok") {
+      followLog[f.pk] = { username: f.username, followedAt: new Date().toISOString(), via: "followback" };
+      followed++;
+      console.log(`   ✅ Followed back @${f.username} (${followed}/${target})`);
+    } else if (result === "session_expired") { console.log("   ⚠️ Session expired"); break; }
+    else if (result === "ratelimit")        { console.log("   ⏸️ Rate limit — stopping"); break; }
+  }
+  saveFollowLog(followLog);
+  return followed;
+}
+
+// ─── FOLLOW MORE — follow-back first, then top up from hashtags ───────────────
+async function followMore(total = 20) {
+  let done = await followBack(total);
+  const tags = [...TARGET_HASHTAGS].sort(() => 0.5 - Math.random());
+  let ti = 0;
+  while (done < total && ti < tags.length) {
+    const got = await followFromHashtag(tags[ti++], Math.min(6, total - done));
+    done += got;
+    if (got === 0) continue;
+    await delay(5000, 10000);
+  }
+  console.log(`\n✅ followMore complete — ${done} new follows this run`);
+  return done;
+}
+
 // ─── FULL GROWTH CYCLE ────────────────────────────────────────────────────────
 async function runGrowthCycle() {
   const ok = await verifySession();
@@ -425,5 +502,8 @@ module.exports = {
   likeFromHashtag,
   commentFromHashtag,
   unfollowNonFollowers,
+  followBack,
+  followMore,
+  getOwnFollowers,
   startSessionKeepAlive,
 };

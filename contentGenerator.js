@@ -906,6 +906,7 @@ function getRandomTopic() {
 }
 
 // ─── BRAND SYSTEM ─────────────────────────────────────────────────────────────
+const BRAND_NAME = process.env.BRAND_NAME || "TamilNadu Unfiltered";
 const BRAND_SYSTEM = `You are the content director of "TamilNadu Unfiltered" — the world's #1 Tamil culture Instagram brand targeting global Tamil diaspora and curious non-Tamils.
 
 BRAND VOICE: Premium, educational, emotionally resonant. Proud without being divisive. Facts only — never myths as facts. Write like a blend of National Geographic and a passionate Tamil professor.
@@ -925,17 +926,36 @@ INSTAGRAM ALGORITHM RULES:
 - Hashtag strategy: 10 mega (1M+), 10 large (100K-1M), 10 niche (10K-100K)`;
 
 // ─── CONTENT GENERATORS ───────────────────────────────────────────────────────
+// ── Post FORMATS — rotated so captions never feel repetitive ──────────────────
+const CAPTION_FORMATS = [
+  { name: "did-you-know",  instr: "Frame the body as a 'Did you know?' revelation. Open the body with a startling little-known fact, then expand." },
+  { name: "myth-buster",   instr: "Frame it as busting a common myth/misconception. Start the body with what people wrongly believe, then reveal the truth." },
+  { name: "listicle",      instr: "Structure the body as 3-5 numbered punchy facts (1️⃣ 2️⃣ 3️⃣ style), each one line." },
+  { name: "storytime",     instr: "Tell it as a short dramatic mini-story with a beginning, tension, and payoff. Narrative voice." },
+  { name: "this-vs-that",  instr: "Use a surprising comparison or 'most people think X, but actually Y' contrast to drive the body." },
+  { name: "untold",        instr: "Frame it as a forgotten/untold/erased piece of Tamil history that deserves to be remembered." },
+  { name: "quiz",          instr: "Open the body with a question the reader can't answer, then deliver the fascinating answer." },
+  { name: "pride",         instr: "Frame it to evoke deep Tamil pride — emphasize how this was first/biggest/oldest in the world." },
+];
+
+// Free Groq models rotated for variety; invalid/unavailable ones fall back safely.
+const CAPTION_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-120b"];
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
 async function generateCaption(topic, category) {
   const imageStyle = pickImageStyle(category);
-  const prompt = `Write a HIGH-ENGAGEMENT Instagram caption for TamilNadu Unfiltered.
+  const format = pick(CAPTION_FORMATS);
+  const prompt = `Write a HIGH-ENGAGEMENT Instagram caption for ${BRAND_NAME}.
 
 Topic: ${topic}
 Category: ${category}
 
+FORMAT FOR THIS POST: "${format.name}" — ${format.instr}
+
 Return ONLY valid JSON, no markdown:
 {
   "hook": "scroll-stopping first line — shocking/surprising/bold (max 10 words)",
-  "body": "main caption (180-220 words). Short punchy sentences. 3-5 specific fascinating facts. Build emotional crescendo. Mobile-reader friendly.",
+  "body": "main caption (180-220 words). Short punchy sentences. 3-5 specific fascinating facts. Build emotional crescendo. Mobile-reader friendly. Follow the FORMAT above.",
   "cta": "call to action — ask a question OR 'Save this before it disappears' OR 'Tag someone who needs to know this'",
   "hashtags": "30 hashtags: 10 mega-viral + 10 category-specific + 10 hyper-niche, as one string",
   "image_prompt": "detailed, evocative text-to-image prompt for this exact topic",
@@ -944,24 +964,37 @@ Return ONLY valid JSON, no markdown:
 
 Image style to use: ${imageStyle}`;
 
-  const response = await getGroq().chat.completions.create({
-    model: "llama-3.3-70b-versatile",
-    messages: [
-      { role: "system", content: BRAND_SYSTEM },
-      { role: "user", content: prompt },
-    ],
-    temperature: 0.85,
-    max_tokens: 1200,
-  });
-
-  const text = response.choices[0].message.content.trim();
-  try {
-    return JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error("Groq returned invalid JSON: " + text.slice(0, 200));
+  // Try a rotated model first, fall back to the reliable default on any error.
+  const models = [pick(CAPTION_MODELS), "llama-3.3-70b-versatile"];
+  let lastErr;
+  for (const model of [...new Set(models)]) {
+    try {
+      const response = await getGroq().chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: BRAND_SYSTEM },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.9,
+        max_tokens: 1200,
+      });
+      const text = response.choices[0].message.content.trim();
+      let parsed;
+      try { parsed = JSON.parse(text); }
+      catch {
+        const match = text.match(/\{[\s\S]*\}/);
+        if (!match) throw new Error("invalid JSON: " + text.slice(0, 120));
+        parsed = JSON.parse(match[0]);
+      }
+      parsed._format = format.name;
+      parsed._model = model;
+      return parsed;
+    } catch (e) {
+      lastErr = e;
+      // try next model in the list
+    }
   }
+  throw new Error("Caption generation failed: " + (lastErr?.message || "unknown"));
 }
 
 async function generateReelScript(topic, category) {

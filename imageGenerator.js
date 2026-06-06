@@ -5,6 +5,10 @@ const path  = require("path");
 
 const HF_URL = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell";
 const wait   = (ms) => new Promise((r) => setTimeout(r, ms));
+const UA     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+const BRAND  = (process.env.BRAND_NAME || "TAMILNADU UNFILTERED").toUpperCase();
+const HANDLE = process.env.IG_USERNAME ? `@${process.env.IG_USERNAME}` : "";
 
 function ensureDir() {
   const dir = path.join(__dirname, "temp_images");
@@ -12,25 +16,179 @@ function ensureDir() {
   return dir;
 }
 
-// Map topic → Unsplash/Flickr search keywords for stock photo fallbacks
-function topicToKeywords(topic = "") {
-  const t = topic.toLowerCase();
-  if (t.match(/temple|kovil|chola|pallava|dravidian|gopuram/)) return "Tamil,Nadu,temple,South,India";
-  if (t.match(/food|cuisine|dosa|idli|biryani|samayal/))       return "Tamil,Nadu,food,South,India";
-  if (t.match(/festival|pongal|diwali|karthigai|celebration/)) return "Tamil,Nadu,festival,South,India";
-  if (t.match(/war|battle|king|emperor|chera|pandya|chola/))   return "India,ancient,history,Tamil,heritage";
-  if (t.match(/dance|music|bharatanatyam|carnatic/))           return "Tamil,Nadu,dance,classical,India";
-  if (t.match(/river|lake|sea|ocean|underwater|coast/))        return "South,India,coastal,nature,water";
-  if (t.match(/village|agriculture|farmer|rural/))             return "Tamil,Nadu,village,rural,India";
-  if (t.match(/science|innovation|technology|math/))           return "India,science,innovation,heritage";
-  if (t.match(/literature|poem|sangam|thirukku/))              return "Tamil,Nadu,culture,heritage,India";
-  return "Tamil,Nadu,South,India,heritage";
+// Providers that hit a hard quota/credit/auth wall are disabled for the rest of
+// the process so we don't waste seconds retrying them on every post (24×/day).
+const _disabled = new Set();
+function disableProvider(name, reason) {
+  if (!_disabled.has(name)) {
+    _disabled.add(name);
+    console.log(`   ⏭️  Disabling ${name} for this run (${reason})`);
+  }
+}
+function isDepletionError(status, body = "") {
+  return status === 402 || status === 401 ||
+    /deplet|quota|credit|exceeded|insufficient|limit reached|payment required/i.test(String(body));
 }
 
-// ── 1. HuggingFace FLUX ───────────────────────────────────────────────────────
+// ── Anti-repeat: remember the last N image identifiers so posts stay fresh ─────
+const HISTORY_FILE = path.join(__dirname, "image_history.json");
+const HISTORY_MAX  = 200;
+function loadImgHistory() {
+  try { return JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8")); } catch { return []; }
+}
+function isUsedImage(id) {
+  if (!id) return false;
+  return loadImgHistory().includes(id);
+}
+function recordImage(id) {
+  if (!id) return;
+  let h = loadImgHistory();
+  if (h.includes(id)) return;
+  h.unshift(id);
+  h = h.slice(0, HISTORY_MAX);
+  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(h)); } catch {}
+}
+// Pick a fresh (not-recently-used) item from a list; falls back to any if all used.
+function pickFresh(items, idOf) {
+  const fresh = items.filter((it) => !isUsedImage(idOf(it)));
+  const pool = fresh.length ? fresh : items;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// ── Category → accent colour theme (for overlay + SVG fallback) ───────────────
+function categoryTheme(category = "", topic = "") {
+  const t = (category + " " + topic).toLowerCase();
+  if (t.match(/temple|kovil|gopuram|spiritual|god|deity/))   return { accent: "#FFD54A", glow: "#7a5a00", tag: "#TamilTemples" };
+  if (t.match(/food|cuisine|dosa|idli|biryani|samayal/))     return { accent: "#FF7043", glow: "#7a2a00", tag: "#TamilFood" };
+  if (t.match(/festival|pongal|deepavali|karthigai|celebr/)) return { accent: "#FF4D8D", glow: "#7a0030", tag: "#TamilFestivals" };
+  if (t.match(/war|battle|king|emperor|chola|pandya|chera|history|warrior/)) return { accent: "#FFB300", glow: "#5a3a00", tag: "#TamilHistory" };
+  if (t.match(/dance|music|bharatanatyam|carnatic|art/))     return { accent: "#26C6DA", glow: "#004a52", tag: "#TamilArt" };
+  if (t.match(/literature|poem|sangam|thirukkural|language/))return { accent: "#AB7CFF", glow: "#2e1a52", tag: "#TamilLiterature" };
+  if (t.match(/nature|river|sea|coast|hill|forest|village/)) return { accent: "#66BB6A", glow: "#1a4a1c", tag: "#TamilNadu" };
+  return { accent: "#FF6B00", glow: "#5a2600", tag: "#TamilPride" };
+}
+
+// ── Topic → concrete searchable photo queries (ordered, most → least specific) ─
+function topicToQueries(topic = "", category = "") {
+  const t = (topic + " " + category).toLowerCase();
+  // Pull notable capitalised proper nouns straight from the topic
+  const proper = (topic.match(/\b[A-Z][a-zA-Z]{3,}\b/g) || [])
+    .filter((w) => !["The", "Tamil", "Nadu", "This", "When", "What", "Why", "How", "Their", "These"].includes(w))
+    .slice(0, 3).join(" ");
+
+  // subject = a noun that keeps a proper-noun query on-theme (so "Chettinad" → "Chettinad cuisine")
+  let subject, base;
+  if (t.match(/temple|kovil|gopuram|pallava|dravidian|shrine/))         { subject = "temple";  base = ["Tamil Nadu temple gopuram", "Dravidian temple architecture", "Meenakshi Amman Temple"]; }
+  else if (t.match(/food|cuisine|dosa|idli|biryani|samayal|sappadu|dish|recipe/)) { subject = "cuisine"; base = ["South Indian food banana leaf", "Tamil Nadu cuisine thali", "dosa idli sambar"]; }
+  else if (t.match(/festival|pongal|deepavali|karthigai|jallikattu|celebration/)) { subject = "festival"; base = ["Pongal festival Tamil Nadu", "Tamil Nadu festival kolam", "Jallikattu"]; }
+  else if (t.match(/war|battle|king|emperor|chola|pandya|chera|warrior|army|navy|dynasty/)) { subject = "sculpture"; base = ["Chola bronze sculpture", "Brihadeeswarar Temple Thanjavur", "ancient Tamil history"]; }
+  else if (t.match(/dance|music|bharatanatyam|carnatic|instrument/))    { subject = "dance";   base = ["Bharatanatyam dancer", "Carnatic music Tamil Nadu", "Tamil classical dance"]; }
+  else if (t.match(/literature|poem|sangam|thirukkural|language|script|poet/)) { subject = "manuscript"; base = ["Tamil script palm leaf manuscript", "Thiruvalluvar statue", "ancient Tamil inscription"]; }
+  else if (t.match(/river|lake|sea|ocean|coast|beach|kanyakumari/))     { subject = "coast";   base = ["Kanyakumari coast", "Marina Beach Chennai", "Cauvery river Tamil Nadu"]; }
+  else if (t.match(/hill|mountain|ooty|kodaikanal|western ghats|tea/))  { subject = "hills";   base = ["Ooty hills Tamil Nadu", "Western Ghats tea estate", "Kodaikanal landscape"]; }
+  else if (t.match(/village|agriculture|farmer|rural|paddy/))           { subject = "village"; base = ["Tamil Nadu village paddy field", "rural Tamil Nadu farmer", "South India countryside"]; }
+  else if (t.match(/science|innovation|technology|astronomy|math/))     { subject = "heritage"; base = ["ancient Indian astronomy", "Tamil Nadu heritage", "Indian observatory"]; }
+  else if (t.match(/saree|silk|kanchipuram|textile|craft|painting/))    { subject = "saree";   base = ["Kanchipuram silk saree", "Tamil Nadu handicraft", "Tanjore painting"]; }
+  else { subject = "heritage"; base = ["Tamil Nadu heritage", "Tamil Nadu culture", "South India temple"]; }
+
+  const queries = [];
+  if (proper) {
+    const properQ = proper.toLowerCase().includes(subject) ? `${proper} Tamil Nadu` : `${proper} ${subject} Tamil Nadu`;
+    queries.push(properQ);
+  }
+  queries.push(...base);
+  return [...new Set(queries)];
+}
+
+// ── Download a remote image to a temp file ────────────────────────────────────
+async function download(url, filename, ext = "jpg") {
+  const img = await axios.get(url, { responseType: "arraybuffer", timeout: 30000, headers: { "User-Agent": UA } });
+  if (!(img.headers["content-type"] || "").includes("image")) throw new Error("not an image");
+  if (img.data.length < 4000) throw new Error("image too small");
+  const fp = path.join(ensureDir(), `${filename}.${ext}`);
+  fs.writeFileSync(fp, img.data);
+  return fp;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  BRANDED PROMO COMPOSITE  — turns a raw photo into a designed 1080×1080 post
+// ════════════════════════════════════════════════════════════════════════════
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function wrapText(text, max) {
+  const words = String(text).trim().split(/\s+/);
+  const lines = []; let cur = "";
+  for (const w of words) {
+    if ((cur + " " + w).trim().length <= max) cur = (cur + " " + w).trim();
+    else { if (cur) lines.push(cur); cur = w; }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function buildOverlaySVG({ hook = "", category = "", topic = "" }) {
+  const { accent, tag } = categoryTheme(category, topic);
+  const headline = (hook || topic || "Tamil Heritage").trim();
+  // Larger font for short hooks, smaller for long ones
+  const fontSize = headline.length <= 22 ? 84 : headline.length <= 40 ? 68 : 56;
+  const maxChars = headline.length <= 22 ? 16 : headline.length <= 40 ? 22 : 28;
+  const lines = wrapText(headline, maxChars).slice(0, 3);
+  const lineH = fontSize + 12;
+  const blockH = lines.length * lineH;
+  const baseY = 1080 - 170 - blockH + fontSize; // sit above the footer
+
+  const headlineSVG = lines.map((l, i) =>
+    `<text x="64" y="${baseY + i * lineH}" font-family="Georgia,'Times New Roman',serif" font-size="${fontSize}" font-weight="bold" fill="#FFFFFF" stroke="#000000" stroke-width="1" paint-order="stroke">${esc(l)}</text>`
+  ).join("\n  ");
+
+  const followCTA = HANDLE ? `Follow ${esc(HANDLE)} for daily Tamil stories` : "Follow for daily Tamil heritage stories";
+
+  return `<svg width="1080" height="1080" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <linearGradient id="botFade" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="48%" stop-color="#000000" stop-opacity="0"/>
+    <stop offset="78%" stop-color="#000000" stop-opacity="0.55"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0.92"/>
+  </linearGradient>
+  <linearGradient id="topFade" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#000000" stop-opacity="0.75"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+  </linearGradient>
+</defs>
+<rect x="0" y="0" width="1080" height="170" fill="url(#topFade)"/>
+<rect x="0" y="430" width="1080" height="650" fill="url(#botFade)"/>
+<rect x="14" y="14" width="1052" height="1052" fill="none" stroke="${accent}" stroke-width="3" opacity="0.85"/>
+<text x="64" y="80" font-family="Arial,Helvetica,sans-serif" font-size="30" font-weight="bold" fill="${accent}" letter-spacing="4">${esc(BRAND)}</text>
+<rect x="64" y="${baseY - fontSize - 26}" width="120" height="7" fill="${accent}"/>
+${headlineSVG}
+<text x="64" y="1024" font-family="Arial,Helvetica,sans-serif" font-size="26" fill="${accent}">${esc(tag)} #TamilNadu #TamilCulture</text>
+<text x="64" y="1058" font-family="Arial,Helvetica,sans-serif" font-size="22" fill="#dddddd">${followCTA}</text>
+</svg>`;
+}
+
+// Convert any raw photo → branded square promo post (sharp required)
+async function compositePromo(rawPath, { hook, category, topic, filename }) {
+  const sharp = require("sharp");
+  const overlay = Buffer.from(buildOverlaySVG({ hook, category, topic }));
+  const base = await sharp(rawPath)
+    .resize(1080, 1080, { fit: "cover", position: "attention" })
+    .modulate({ saturation: 1.08 })
+    .toBuffer();
+  const fp = path.join(ensureDir(), `${filename}_promo.jpg`);
+  await sharp(base).composite([{ input: overlay, top: 0, left: 0 }]).jpeg({ quality: 88 }).toFile(fp);
+  // remove the raw intermediate
+  try { if (rawPath !== fp && fs.existsSync(rawPath)) fs.unlinkSync(rawPath); } catch {}
+  return fp;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  AI ART PROVIDERS  (return finished artwork — used directly, no compositing)
+// ════════════════════════════════════════════════════════════════════════════
+
 async function tryHuggingFace(prompt, filename) {
-  if (!process.env.HF_API_KEY) return null;
-  console.log(`🎨 [1] HuggingFace FLUX`);
+  if (!process.env.HF_API_KEY || _disabled.has("HuggingFace")) return null;
+  console.log(`🎨 [AI] HuggingFace FLUX`);
   try {
     const r = await axios({
       url: HF_URL, method: "post",
@@ -38,22 +196,22 @@ async function tryHuggingFace(prompt, filename) {
       headers: { Authorization: `Bearer ${process.env.HF_API_KEY}`, "Content-Type": "application/json", Accept: "image/jpeg" },
       responseType: "arraybuffer", timeout: 90000,
     });
-    if (r.data.length < 5000) throw new Error("Response too small — likely error");
+    if (r.data.length < 5000) throw new Error("Response too small");
     const fp = path.join(ensureDir(), `${filename}.jpg`);
     fs.writeFileSync(fp, r.data);
     console.log(`   ✅ HuggingFace OK (${r.data.length} bytes)`);
     return fp;
   } catch (e) {
-    const s = Buffer.from(e.response?.data || []).toString().slice(0, 80);
+    const s = Buffer.from(e.response?.data || []).toString().slice(0, 70);
     console.log(`   ⚠️  HF (${e.response?.status}): ${s || e.message}`);
+    if (isDepletionError(e.response?.status, s)) disableProvider("HuggingFace", "credits depleted");
     return null;
   }
 }
 
-// ── 2. Together AI — FLUX.1-schnell-Free ─────────────────────────────────────
 async function tryTogetherAI(prompt, filename) {
-  if (!process.env.TOGETHER_API_KEY) return null;
-  console.log(`🎨 [2] Together AI FLUX`);
+  if (!process.env.TOGETHER_API_KEY || _disabled.has("TogetherAI")) return null;
+  console.log(`🎨 [AI] Together AI FLUX`);
   try {
     const r = await axios.post(
       "https://api.together.xyz/v1/images/generations",
@@ -62,29 +220,27 @@ async function tryTogetherAI(prompt, filename) {
     );
     const url = r.data?.data?.[0]?.url;
     if (!url) throw new Error("No URL");
-    const img = await axios.get(url, { responseType: "arraybuffer", timeout: 30000 });
-    const fp = path.join(ensureDir(), `${filename}.jpg`);
-    fs.writeFileSync(fp, img.data);
+    const fp = await download(url, filename);
     console.log(`   ✅ Together AI OK`);
     return fp;
   } catch (e) {
-    console.log(`   ⚠️  Together AI: ${e.response?.data?.error || e.message}`);
+    const msg = e.response?.data?.error?.message || e.message;
+    console.log(`   ⚠️  Together AI: ${msg}`);
+    if (isDepletionError(e.response?.status, msg)) disableProvider("TogetherAI", "quota/credits");
     return null;
   }
 }
 
-// ── 3. Stability AI ───────────────────────────────────────────────────────────
 async function tryStabilityAI(prompt, filename) {
-  if (!process.env.STABILITY_API_KEY) return null;
-  console.log(`🎨 [3] Stability AI`);
+  if (!process.env.STABILITY_API_KEY || _disabled.has("StabilityAI")) return null;
+  console.log(`🎨 [AI] Stability AI`);
   try {
     const FormData = require("form-data");
     const fd = new FormData();
     fd.append("prompt", `Tamil Nadu, ${prompt.slice(0, 150)}, photorealistic, cinematic`);
     fd.append("output_format", "jpeg");
     const r = await axios.post(
-      "https://api.stability.ai/v2beta/stable-image/generate/ultra",
-      fd,
+      "https://api.stability.ai/v2beta/stable-image/generate/core", fd,
       { headers: { ...fd.getHeaders(), Authorization: `Bearer ${process.env.STABILITY_API_KEY}`, Accept: "image/*" }, responseType: "arraybuffer", timeout: 60000 }
     );
     const fp = path.join(ensureDir(), `${filename}.jpg`);
@@ -92,135 +248,15 @@ async function tryStabilityAI(prompt, filename) {
     console.log(`   ✅ Stability AI OK`);
     return fp;
   } catch (e) {
-    console.log(`   ⚠️  Stability AI: ${e.response?.status}`);
+    console.log(`   ⚠️  Stability AI: ${e.response?.status || e.message}`);
+    if (isDepletionError(e.response?.status)) disableProvider("StabilityAI", "quota/credits");
     return null;
   }
 }
 
-// ── 4. DeepAI text2img (free account — add DEEPAI_API_KEY) ───────────────────
-async function tryDeepAI(prompt, filename) {
-  if (!process.env.DEEPAI_API_KEY) return null;
-  console.log(`🎨 [4] DeepAI text2img`);
-  try {
-    const FormData = require("form-data");
-    const fd = new FormData();
-    fd.append("text", `Tamil Nadu South India, ${prompt.slice(0, 150)}, photorealistic, vibrant, cinematic`);
-    const r = await axios.post("https://api.deepai.org/api/text2img", fd, {
-      headers: { ...fd.getHeaders(), "api-key": process.env.DEEPAI_API_KEY },
-      timeout: 60000,
-    });
-    const imageUrl = r.data?.output_url;
-    if (!imageUrl) throw new Error("No output URL");
-    const img = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 30000 });
-    const fp = path.join(ensureDir(), `${filename}.jpg`);
-    fs.writeFileSync(fp, img.data);
-    console.log(`   ✅ DeepAI OK`);
-    return fp;
-  } catch (e) {
-    console.log(`   ⚠️  DeepAI: ${e.response?.data?.err || e.message}`);
-    return null;
-  }
-}
-
-// ── 5. Prodia SD (free account — add PRODIA_API_KEY) ─────────────────────────
-async function tryProdia(prompt, filename) {
-  if (!process.env.PRODIA_API_KEY) return null;
-  console.log(`🎨 [5] Prodia (Stable Diffusion)`);
-  try {
-    const gen = await axios.get("https://api.prodia.com/v1/sd/generate", {
-      params: { apikey: process.env.PRODIA_API_KEY, prompt: `Tamil Nadu, ${prompt.slice(0, 100)}, photorealistic, 8k, vibrant`, model: "dreamshaperXL10_alpha2.safetensors [c8afe2ef]", steps: 25, width: 1024, height: 1024 },
-      timeout: 10000,
-    });
-    const jobId = gen.data?.job;
-    if (!jobId) throw new Error("No job ID");
-    // Poll for completion
-    for (let i = 0; i < 20; i++) {
-      await wait(4000);
-      const status = await axios.get(`https://api.prodia.com/v1/job/${jobId}`, { params: { apikey: process.env.PRODIA_API_KEY }, timeout: 10000 });
-      if (status.data?.status === "succeeded") {
-        const img = await axios.get(status.data.imageUrl, { responseType: "arraybuffer", timeout: 30000 });
-        const fp = path.join(ensureDir(), `${filename}.jpg`);
-        fs.writeFileSync(fp, img.data);
-        console.log(`   ✅ Prodia OK`);
-        return fp;
-      }
-      if (status.data?.status === "failed") throw new Error("Job failed");
-    }
-    throw new Error("Timeout");
-  } catch (e) {
-    console.log(`   ⚠️  Prodia: ${e.message}`);
-    return null;
-  }
-}
-
-// ── 6. Pollinations (multiple models, simplified URL) ─────────────────────────
-async function tryPollinations(prompt, filename, model, layer) {
-  console.log(`🎨 [${layer}] Pollinations (${model})`);
-  const p    = encodeURIComponent(`Tamil Nadu, ${prompt.slice(0, 120)}, photorealistic, cinematic`);
-  const seed = Math.floor(Math.random() * 999999);
-  const url  = model
-    ? `https://image.pollinations.ai/prompt/${p}?model=${model}&width=1024&height=1024&seed=${seed}`
-    : `https://image.pollinations.ai/prompt/${p}?width=1024&height=1024&seed=${seed}`;
-  for (let i = 0; i < 2; i++) {
-    try {
-      const r = await axios.get(url, {
-        responseType: "arraybuffer", timeout: 90000,
-        headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36" },
-      });
-      if (!(r.headers["content-type"] || "").includes("image")) throw new Error("Not an image");
-      if (r.data.length < 5000) throw new Error("Image too small");
-      const fp = path.join(ensureDir(), `${filename}.png`);
-      fs.writeFileSync(fp, r.data);
-      console.log(`   ✅ Pollinations ${model || "default"} OK`);
-      return fp;
-    } catch (e) {
-      if (i === 0) { await wait(8000); continue; }
-      console.log(`   ⚠️  Pollinations ${model || "default"}: ${e.response?.status || e.message}`);
-      return null;
-    }
-  }
-  return null;
-}
-
-// ── 6b. Replicate — open-source SDXL/FLUX (free credits on signup) ───────────
-async function tryReplicate(prompt, filename) {
-  if (!process.env.REPLICATE_API_TOKEN) return null;
-  console.log(`🎨 [6b] Replicate (SDXL)`);
-  try {
-    const r1 = await axios.post(
-      "https://api.replicate.com/v1/models/stability-ai/sdxl/predictions",
-      { input: { prompt: `Tamil Nadu, South India, ${prompt.slice(0, 150)}, photorealistic, cinematic, vibrant, 8k`, width: 1024, height: 1024, num_outputs: 1 } },
-      { headers: { Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}`, "Content-Type": "application/json" }, timeout: 15000 }
-    );
-    const predId = r1.data.id;
-    if (!predId) throw new Error("No prediction ID");
-    for (let i = 0; i < 30; i++) {
-      await wait(3000);
-      const poll = await axios.get(`https://api.replicate.com/v1/predictions/${predId}`, {
-        headers: { Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}` }, timeout: 10000,
-      });
-      if (poll.data.status === "succeeded") {
-        const imgUrl = poll.data.output?.[0];
-        if (!imgUrl) throw new Error("No output URL");
-        const img = await axios.get(imgUrl, { responseType: "arraybuffer", timeout: 30000 });
-        const fp = path.join(ensureDir(), `${filename}.jpg`);
-        fs.writeFileSync(fp, img.data);
-        console.log(`   ✅ Replicate OK`);
-        return fp;
-      }
-      if (poll.data.status === "failed") throw new Error("Prediction failed");
-    }
-    throw new Error("Timeout");
-  } catch (e) {
-    console.log(`   ⚠️  Replicate: ${e.response?.data?.detail || e.message}`);
-    return null;
-  }
-}
-
-// ── 6c. Fal.ai — fast FLUX (free credits on signup) ──────────────────────────
 async function tryFalAI(prompt, filename) {
-  if (!process.env.FAL_KEY) return null;
-  console.log(`🎨 [6c] Fal.ai (FLUX)`);
+  if (!process.env.FAL_KEY || _disabled.has("FalAI")) return null;
+  console.log(`🎨 [AI] Fal.ai FLUX`);
   try {
     const r = await axios.post(
       "https://fal.run/fal-ai/flux/schnell",
@@ -229,33 +265,99 @@ async function tryFalAI(prompt, filename) {
     );
     const imgUrl = r.data?.images?.[0]?.url;
     if (!imgUrl) throw new Error("No image URL");
-    const img = await axios.get(imgUrl, { responseType: "arraybuffer", timeout: 30000 });
-    const fp = path.join(ensureDir(), `${filename}.jpg`);
-    fs.writeFileSync(fp, img.data);
+    const fp = await download(imgUrl, filename);
     console.log(`   ✅ Fal.ai OK`);
     return fp;
   } catch (e) {
-    console.log(`   ⚠️  Fal.ai: ${e.response?.data?.detail || e.message}`);
+    const msg = e.response?.data?.detail || e.message;
+    console.log(`   ⚠️  Fal.ai: ${msg}`);
+    if (isDepletionError(e.response?.status, msg)) disableProvider("FalAI", "quota/credits");
     return null;
   }
 }
 
-// ── 6d. Pexels — high-quality stock photos (free API key) ─────────────────────
-async function tryPexels(topic, filename) {
+// ════════════════════════════════════════════════════════════════════════════
+//  PHOTO PROVIDERS  (return a RAW photo path → composited into a branded post)
+// ════════════════════════════════════════════════════════════════════════════
+
+// Wikimedia Commons — FREE, no key, real on-topic Tamil Nadu photos
+async function tryWikimedia(topic, category, filename) {
+  console.log(`📷 [Photo] Wikimedia Commons`);
+  const queries = topicToQueries(topic, category);
+  for (const q of queries) {
+    try {
+      const r = await axios.get("https://commons.wikimedia.org/w/api.php", {
+        params: {
+          action: "query", format: "json", generator: "search",
+          gsrsearch: q, gsrnamespace: 6, gsrlimit: 20,
+          gsroffset: Math.floor(Math.random() * 10), // vary results for freshness
+          prop: "imageinfo", iiprop: "url|mime|size", iiurlwidth: 1200,
+        },
+        timeout: 18000, headers: { "User-Agent": "TamilAutoBot/2.0 (Instagram heritage education)" },
+      });
+      const pages = Object.values(r.data?.query?.pages || {});
+      const imgs = pages
+        .map((p) => p.imageinfo?.[0])
+        .filter((i) => i && /jpe?g|png/i.test(i.mime || "") && (i.thumbwidth || i.width || 0) >= 800);
+      if (!imgs.length) continue;
+      const pick = pickFresh(imgs, (i) => i.url);          // skip recently-used
+      const fp = await download(pick.thumburl || pick.url, filename);
+      recordImage(pick.url);
+      console.log(`   ✅ Wikimedia OK ("${q}")`);
+      return fp;
+    } catch (e) {
+      // try next query
+    }
+  }
+  console.log(`   ⚠️  Wikimedia: no usable results`);
+  return null;
+}
+
+// Openverse — FREE, no key, CC-licensed photos
+async function tryOpenverse(topic, category, filename) {
+  console.log(`📷 [Photo] Openverse`);
+  const queries = topicToQueries(topic, category);
+  for (const q of queries) {
+    try {
+      const r = await axios.get("https://api.openverse.org/v1/images/", {
+        params: { q, page_size: 12, mature: false, license_type: "all" },
+        timeout: 18000, headers: { "User-Agent": "TamilAutoBot/2.0" },
+      });
+      const results = (r.data?.results || []).filter((i) => i.url && (i.width || 0) >= 800);
+      if (!results.length) continue;
+      // prefer not-recently-used, shuffle, then try downloads until one succeeds (some Flickr CDNs rate-limit)
+      const freshFirst = results.slice(0, 12).sort(() => Math.random() - 0.5)
+        .sort((a, b) => (isUsedImage(a.url) ? 1 : 0) - (isUsedImage(b.url) ? 1 : 0));
+      for (const item of freshFirst) {
+        try {
+          const fp = await download(item.url, filename);
+          recordImage(item.url);
+          console.log(`   ✅ Openverse OK ("${q}")`);
+          return fp;
+        } catch { /* next item */ }
+      }
+    } catch (e) {
+      // try next query
+    }
+  }
+  console.log(`   ⚠️  Openverse: no usable results`);
+  return null;
+}
+
+// Pexels — high-quality stock (free API key, optional)
+async function tryPexels(topic, category, filename) {
   if (!process.env.PEXELS_API_KEY) return null;
-  console.log(`🎨 [6d] Pexels (stock photos)`);
-  const kw = topicToKeywords(topic).replace(/,/g, " ");
+  console.log(`📷 [Photo] Pexels`);
   try {
-    const r = await axios.get(`https://api.pexels.com/v1/search?query=${encodeURIComponent(kw)}&per_page=15&orientation=square`, {
+    const q = topicToQueries(topic, category)[0];
+    const r = await axios.get("https://api.pexels.com/v1/search", {
+      params: { query: q, per_page: 15, orientation: "square" },
       headers: { Authorization: process.env.PEXELS_API_KEY }, timeout: 15000,
     });
     const photos = r.data?.photos;
     if (!photos?.length) throw new Error("No results");
     const pick = photos[Math.floor(Math.random() * Math.min(8, photos.length))];
-    const imgUrl = pick.src?.large2x || pick.src?.large;
-    const img = await axios.get(imgUrl, { responseType: "arraybuffer", timeout: 30000 });
-    const fp = path.join(ensureDir(), `${filename}.jpg`);
-    fs.writeFileSync(fp, img.data);
+    const fp = await download(pick.src?.large2x || pick.src?.large, filename);
     console.log(`   ✅ Pexels OK`);
     return fp;
   } catch (e) {
@@ -264,22 +366,20 @@ async function tryPexels(topic, filename) {
   }
 }
 
-// ── 6e. Pixabay — free images (free API key, no attribution needed) ───────────
-async function tryPixabay(topic, filename) {
+// Pixabay — free images (free API key, optional)
+async function tryPixabay(topic, category, filename) {
   if (!process.env.PIXABAY_API_KEY) return null;
-  console.log(`🎨 [6e] Pixabay (stock photos)`);
-  const kw = topicToKeywords(topic).replace(/,/g, "+");
+  console.log(`📷 [Photo] Pixabay`);
   try {
-    const r = await axios.get(`https://pixabay.com/api/?key=${process.env.PIXABAY_API_KEY}&q=${encodeURIComponent(kw)}&image_type=photo&orientation=vertical&min_width=1000&per_page=20`, {
+    const q = topicToQueries(topic, category)[0];
+    const r = await axios.get("https://pixabay.com/api/", {
+      params: { key: process.env.PIXABAY_API_KEY, q, image_type: "photo", min_width: 1000, per_page: 20 },
       timeout: 15000,
     });
     const hits = r.data?.hits;
     if (!hits?.length) throw new Error("No results");
     const pick = hits[Math.floor(Math.random() * Math.min(8, hits.length))];
-    const imgUrl = pick.largeImageURL;
-    const img = await axios.get(imgUrl, { responseType: "arraybuffer", timeout: 30000 });
-    const fp = path.join(ensureDir(), `${filename}.jpg`);
-    fs.writeFileSync(fp, img.data);
+    const fp = await download(pick.largeImageURL, filename);
     console.log(`   ✅ Pixabay OK`);
     return fp;
   } catch (e) {
@@ -288,146 +388,59 @@ async function tryPixabay(topic, filename) {
   }
 }
 
-// ── 9. Lexica.art — search existing AI images (FREE, no auth) ─────────────────
-async function tryLexica(prompt, topic, filename) {
-  console.log(`🎨 [9] Lexica.art (AI image search)`);
-  try {
-    const q = `Tamil Nadu South India ${prompt.slice(0, 60)}`;
-    const r = await axios.get(`https://lexica.art/api/v1/search?q=${encodeURIComponent(q)}`, {
-      timeout: 15000, headers: { "User-Agent": "Mozilla/5.0" },
-    });
-    const images = r.data?.images;
-    if (!images?.length) throw new Error("No results");
-    const pick = images[Math.floor(Math.random() * Math.min(8, images.length))];
-    const srcUrl = pick.src || pick.srcSmall;
-    if (!srcUrl) throw new Error("No src URL");
-    const img = await axios.get(srcUrl, { responseType: "arraybuffer", timeout: 30000, headers: { "User-Agent": "Mozilla/5.0" } });
-    const fp = path.join(ensureDir(), `${filename}.jpg`);
-    fs.writeFileSync(fp, img.data);
-    console.log(`   ✅ Lexica.art OK`);
-    return fp;
-  } catch (e) {
-    console.log(`   ⚠️  Lexica.art: ${e.message}`);
-    return null;
-  }
-}
+// ════════════════════════════════════════════════════════════════════════════
+//  GUARANTEED LOCAL FALLBACK  — designed SVG card (no internet, never fails)
+// ════════════════════════════════════════════════════════════════════════════
+function generateSVGImage(topic, hook, category, filename) {
+  console.log(`🎨 [Local] SVG Canvas (guaranteed)`);
+  const { accent, glow, tag } = categoryTheme(category, topic);
 
-// ── 10. Unsplash Source (FREE, no auth) ───────────────────────────────────────
-async function tryUnsplash(topic, filename) {
-  console.log(`🎨 [10] Unsplash (stock photos)`);
-  const kw = topicToKeywords(topic);
-  try {
-    const r = await axios.get(`https://source.unsplash.com/1080x1080/?${kw}`, {
-      responseType: "arraybuffer", timeout: 20000, maxRedirects: 10,
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-    });
-    if (!(r.headers["content-type"] || "").includes("image")) throw new Error("Not an image");
-    const fp = path.join(ensureDir(), `${filename}.jpg`);
-    fs.writeFileSync(fp, r.data);
-    console.log(`   ✅ Unsplash OK`);
-    return fp;
-  } catch (e) {
-    console.log(`   ⚠️  Unsplash: ${e.response?.status || e.message}`);
-    return null;
-  }
-}
-
-// ── 11. Lorem Flickr (FREE, Flickr CC photos, no auth) ───────────────────────
-async function tryLoremFlickr(topic, filename) {
-  console.log(`🎨 [11] Lorem Flickr (CC photos)`);
-  const kw = topicToKeywords(topic).replace(/,/g, "/");
-  try {
-    const r = await axios.get(`https://loremflickr.com/1080/1080/${kw}?lock=${Math.floor(Math.random() * 99999)}`, {
-      responseType: "arraybuffer", timeout: 20000, maxRedirects: 10,
-      headers: { "User-Agent": "Mozilla/5.0" },
-    });
-    if (!(r.headers["content-type"] || "").includes("image")) throw new Error("Not an image");
-    const fp = path.join(ensureDir(), `${filename}.jpg`);
-    fs.writeFileSync(fp, r.data);
-    console.log(`   ✅ Lorem Flickr OK`);
-    return fp;
-  } catch (e) {
-    console.log(`   ⚠️  Lorem Flickr: ${e.response?.status || e.message}`);
-    return null;
-  }
-}
-
-// ── 12. SVG Canvas — GUARANTEED (pure JS, zero internet, never fails) ─────────
-function generateSVGImage(topic, hook, filename) {
-  console.log(`🎨 [12] SVG Canvas (local — guaranteed)`);
-
-  const esc  = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-  const wrap = (text, max) => {
-    const words = String(text).split(" ");
-    const lines = []; let cur = "";
-    for (const w of words) {
-      if ((cur + " " + w).trim().length <= max) cur = (cur + " " + w).trim();
-      else { if (cur) lines.push(cur); cur = w; }
-    }
-    if (cur) lines.push(cur);
-    return lines;
-  };
-
-  const hookLines  = wrap(hook  || topic, 20);
-  const topicLines = wrap(topic || hook,  30).slice(0, 3);
-  const hookY      = 300;
-  const topicY     = hookY + hookLines.length * 82 + 90;
+  const hookLines  = wrapText(hook || topic, 18).slice(0, 4);
+  const topicLines = wrapText(topic || hook, 32).slice(0, 3);
+  const hookY      = 340;
+  const topicY     = hookY + hookLines.length * 84 + 80;
 
   const hookSVG = hookLines.map((l, i) =>
-    `<text x="540" y="${hookY + i * 82}" font-family="Georgia,'Times New Roman',serif" font-size="68" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${esc(l)}</text>`
+    `<text x="540" y="${hookY + i * 84}" font-family="Georgia,'Times New Roman',serif" font-size="70" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${esc(l)}</text>`
   ).join("\n  ");
-
   const topicSVG = topicLines.map((l, i) =>
-    `<text x="540" y="${topicY + i * 58}" font-family="Arial,Helvetica,sans-serif" font-size="42" fill="#FFD700" text-anchor="middle">${esc(l)}</text>`
+    `<text x="540" y="${topicY + i * 56}" font-family="Arial,Helvetica,sans-serif" font-size="40" fill="${accent}" text-anchor="middle">${esc(l)}</text>`
   ).join("\n  ");
 
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="1080" height="1080" xmlns="http://www.w3.org/2000/svg">
 <defs>
-  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0%" stop-color="#110200"/>
-    <stop offset="40%" stop-color="#2a0700"/>
-    <stop offset="100%" stop-color="#040404"/>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#120300"/>
+    <stop offset="45%" stop-color="#240800"/>
+    <stop offset="100%" stop-color="#050505"/>
   </linearGradient>
-  <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
-    <stop offset="0%" stop-color="#FF6B00" stop-opacity="0"/>
-    <stop offset="25%" stop-color="#FF6B00"/>
-    <stop offset="75%" stop-color="#FF6B00"/>
-    <stop offset="100%" stop-color="#FF6B00" stop-opacity="0"/>
-  </linearGradient>
-  <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
-    <stop offset="0%" stop-color="#FFD700" stop-opacity="0"/>
-    <stop offset="25%" stop-color="#FFD700"/>
-    <stop offset="75%" stop-color="#FFD700"/>
-    <stop offset="100%" stop-color="#FFD700" stop-opacity="0"/>
-  </linearGradient>
-  <radialGradient id="glow" cx="50%" cy="40%" r="55%">
-    <stop offset="0%" stop-color="#CC3300" stop-opacity="0.25"/>
-    <stop offset="100%" stop-color="#CC3300" stop-opacity="0"/>
+  <radialGradient id="glow" cx="50%" cy="38%" r="60%">
+    <stop offset="0%" stop-color="${glow}" stop-opacity="0.55"/>
+    <stop offset="100%" stop-color="${glow}" stop-opacity="0"/>
   </radialGradient>
+  <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0%" stop-color="${accent}" stop-opacity="0"/>
+    <stop offset="50%" stop-color="${accent}"/>
+    <stop offset="100%" stop-color="${accent}" stop-opacity="0"/>
+  </linearGradient>
 </defs>
 <rect width="1080" height="1080" fill="url(#bg)"/>
 <rect width="1080" height="1080" fill="url(#glow)"/>
-<rect x="12" y="12" width="1056" height="1056" fill="none" stroke="#FF6B00" stroke-width="3"/>
-<rect x="20" y="20" width="1040" height="1040" fill="none" stroke="#FF6B00" stroke-width="1" stroke-dasharray="12,7" opacity="0.5"/>
-<polyline points="12,80 12,12 80,12"    fill="none" stroke="#FFD700" stroke-width="6"/>
-<polyline points="1000,12 1068,12 1068,80"  fill="none" stroke="#FFD700" stroke-width="6"/>
-<polyline points="12,1000 12,1068 80,1068"  fill="none" stroke="#FFD700" stroke-width="6"/>
-<polyline points="1000,1068 1068,1068 1068,1000" fill="none" stroke="#FFD700" stroke-width="6"/>
-<rect x="12" y="12" width="1056" height="108" fill="#FF6B00" fill-opacity="0.18"/>
-<text x="540" y="78" font-family="Arial,Helvetica,sans-serif" font-size="32" font-weight="bold" fill="#FF6B00" text-anchor="middle" letter-spacing="5">TAMILNADU UNFILTERED</text>
-<rect x="60" y="122" width="960" height="2.5" fill="url(#fade)"/>
-<circle cx="60" cy="123" r="5" fill="#FF6B00"/>
-<circle cx="1020" cy="123" r="5" fill="#FF6B00"/>
+<rect x="14" y="14" width="1052" height="1052" fill="none" stroke="${accent}" stroke-width="3"/>
+<rect x="22" y="22" width="1036" height="1036" fill="none" stroke="${accent}" stroke-width="1" stroke-dasharray="12,7" opacity="0.45"/>
+<polyline points="14,84 14,14 84,14"          fill="none" stroke="#FFD700" stroke-width="6"/>
+<polyline points="996,14 1066,14 1066,84"      fill="none" stroke="#FFD700" stroke-width="6"/>
+<polyline points="14,996 14,1066 84,1066"      fill="none" stroke="#FFD700" stroke-width="6"/>
+<polyline points="996,1066 1066,1066 1066,996" fill="none" stroke="#FFD700" stroke-width="6"/>
+<text x="540" y="120" font-family="Arial,Helvetica,sans-serif" font-size="34" font-weight="bold" fill="${accent}" text-anchor="middle" letter-spacing="6">${esc(BRAND)}</text>
+<rect x="90" y="150" width="900" height="2.5" fill="url(#line)"/>
 ${hookSVG}
-<rect x="160" y="${topicY - 48}" width="760" height="2" fill="url(#gold)"/>
+<rect x="290" y="${topicY - 50}" width="500" height="2" fill="url(#line)"/>
 ${topicSVG}
-<rect x="60" y="942" width="960" height="2.5" fill="url(#fade)"/>
-<circle cx="60" cy="943" r="5" fill="#FF6B00"/>
-<circle cx="1020" cy="943" r="5" fill="#FF6B00"/>
-<rect x="12" y="952" width="1056" height="116" fill="#FF6B00" fill-opacity="0.10"/>
-<text x="540" y="994" font-family="Arial,Helvetica,sans-serif" font-size="24" fill="#FF6B00" text-anchor="middle">#TamilHistory #TamilCulture #TamilNadu #TamilPride</text>
-<text x="540" y="1042" font-family="Arial,Helvetica,sans-serif" font-size="20" fill="#888" text-anchor="middle">Follow for daily Tamil heritage stories</text>
+<rect x="90" y="936" width="900" height="2.5" fill="url(#line)"/>
+<text x="540" y="990" font-family="Arial,Helvetica,sans-serif" font-size="26" fill="${accent}" text-anchor="middle">${esc(tag)} #TamilNadu #TamilCulture #TamilPride</text>
+<text x="540" y="1034" font-family="Arial,Helvetica,sans-serif" font-size="22" fill="#999" text-anchor="middle">${HANDLE ? "Follow " + esc(HANDLE) + " for daily Tamil heritage" : "Follow for daily Tamil heritage stories"}</text>
 </svg>`;
 
   try {
@@ -444,57 +457,48 @@ ${topicSVG}
   }
 }
 
-// ── MASTER PIPELINE — 12 layers, never fails ──────────────────────────────────
-async function smartGenerateImage(imagePrompt, filename, { topic = "", hook = "" } = {}) {
+// ════════════════════════════════════════════════════════════════════════════
+//  MASTER PIPELINE
+//  1) AI art (if API keys present) → use as-is
+//  2) Real free photos (Wikimedia → Openverse → Pexels → Pixabay) → brand it
+//  3) Guaranteed designed SVG card
+// ════════════════════════════════════════════════════════════════════════════
+async function smartGenerateImage(imagePrompt, filename, { topic = "", hook = "", category = "" } = {}) {
   const p = imagePrompt || topic;
 
-  const r1 = await tryHuggingFace(p, filename);
-  if (r1) return r1;
+  // ── Stage 1: AI art providers (only run if their key is set) ──
+  const artProviders = [
+    () => tryHuggingFace(p, filename),
+    () => tryTogetherAI(p, filename + "_tog"),
+    () => tryFalAI(p, filename + "_fal"),
+    () => tryStabilityAI(p, filename + "_stab"),
+  ];
+  for (const provider of artProviders) {
+    const art = await provider();
+    if (art) return art;
+  }
 
-  const r2 = await tryTogetherAI(p, filename + "_tog");
-  if (r2) return r2;
+  // ── Stage 2: real free photos → branded composite ──
+  const photoProviders = [
+    () => tryWikimedia(topic || p, category, filename + "_wiki"),
+    () => tryOpenverse(topic || p, category, filename + "_ov"),
+    () => tryPexels(topic || p, category, filename + "_pex"),
+    () => tryPixabay(topic || p, category, filename + "_pix"),
+  ];
+  for (const provider of photoProviders) {
+    const raw = await provider();
+    if (raw) {
+      try {
+        return await compositePromo(raw, { hook, category, topic, filename });
+      } catch (e) {
+        console.log(`   ⚠️  Compositing failed (${e.message}) — using raw photo`);
+        return raw;
+      }
+    }
+  }
 
-  const r3 = await tryStabilityAI(p, filename + "_stab");
-  if (r3) return r3;
-
-  const r4 = await tryDeepAI(p, filename + "_dap");
-  if (r4) return r4;
-
-  const r5 = await tryProdia(p, filename + "_pro");
-  if (r5) return r5;
-
-  const r6b = await tryReplicate(p, filename + "_rep");
-  if (r6b) return r6b;
-
-  const r6c = await tryFalAI(p, filename + "_fal");
-  if (r6c) return r6c;
-
-  const r6d = await tryPexels(topic || p, filename + "_pex");
-  if (r6d) return r6d;
-
-  const r6e = await tryPixabay(topic || p, filename + "_pix");
-  if (r6e) return r6e;
-
-  const r6 = await tryPollinations(p, filename + "_pol1", null, "6f");
-  if (r6) return r6;
-
-  const r7 = await tryPollinations(p, filename + "_pol2", "flux", "6g");
-  if (r7) return r7;
-
-  const r8 = await tryPollinations(p, filename + "_pol3", "turbo", "6h");
-  if (r8) return r8;
-
-  const r9 = await tryLexica(p, topic, filename + "_lex");
-  if (r9) return r9;
-
-  const r10 = await tryUnsplash(topic || p, filename + "_uns");
-  if (r10) return r10;
-
-  const r11 = await tryLoremFlickr(topic || p, filename + "_flk");
-  if (r11) return r11;
-
-  // Layer 12 — GUARANTEED
-  return generateSVGImage(topic || p, hook || p, filename);
+  // ── Stage 3: guaranteed local card ──
+  return generateSVGImage(topic || p, hook || p, category, filename);
 }
 
 function cleanupImage(filePath) {
@@ -503,4 +507,4 @@ function cleanupImage(filePath) {
   } catch {}
 }
 
-module.exports = { smartGenerateImage, cleanupImage };
+module.exports = { smartGenerateImage, cleanupImage, compositePromo, topicToQueries, categoryTheme, generateSVGImage };

@@ -5,6 +5,7 @@ post_log.json
 growth_log.json
 follow_log.json
 used_topics.json
+image_history.json
 ig_session.json
 *.log
 test-local.js

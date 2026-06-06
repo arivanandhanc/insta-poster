@@ -7,12 +7,36 @@
 
 ## What This Does
 
-Every day, automatically at 7am / 12pm / 3pm / 6pm / 9pm IST:
-1. Picks a topic from 135 unique Tamil culture topics (rotates automatically)
+Automatically, on a peak-hour schedule (IST):
+1. Picks a topic from 730+ Tamil culture topics (rotates, plus unlimited AI topics)
 2. Generates caption + hashtags using **Groq AI (free)**
-3. Generates image using **Hugging Face (free)**
-4. Posts to your Instagram Business account
-5. Logs everything for tracking
+3. Generates a **branded 1080×1080 promo image** (see below)
+4. Posts to Instagram (private API session — no Facebook app needed)
+5. Runs the growth engine (follow / like / comment) and logs everything
+
+---
+
+## Image Pipeline (works with ZERO API keys)
+
+The image generator is a multi-stage pipeline that **never fails**:
+
+1. **AI art** — HuggingFace / Together / Fal / Stability (only if you add a key).
+   Depleted providers auto-disable for the session so they aren't retried.
+2. **Real photos → branded** — searches **Wikimedia Commons** and **Openverse**
+   (both free, no key) for an on-topic Tamil Nadu photo, then composites it into
+   a designed 1080×1080 post: real photo + gradient + headline + branding + tags.
+   Optional **Pexels / Pixabay** keys slot in here too.
+3. **Local SVG card** — a guaranteed, offline, category-themed text card if every
+   network source is down.
+
+You get genuine, relevant, professional-looking posts out of the box. Add any AI
+key from `.env.example` to upgrade stage 1 to generated art.
+
+### Run the tests (safe — never posts)
+```bash
+npm test            # full suite: content, images, posting paths, growth, dry-run
+npm run test:quick  # faster, fewer image samples
+```
 
 ---
 

@@ -60,7 +60,7 @@ async function runPostPipeline(options = {}) {
     const safeFilename = topic.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 40) + `_${timestamp}`;
 
     console.log("\n🎨 Generating image...");
-    imagePath = await smartGenerateImage(content.image_prompt, safeFilename, { topic, hook: content.hook });
+    imagePath = await smartGenerateImage(content.image_prompt, safeFilename, { topic, hook: content.hook, category });
 
     if (!imagePath) throw new Error("Image generation failed — no image to post");
 
@@ -98,42 +98,7 @@ async function runPostPipeline(options = {}) {
   }
 }
 
-// ─── PEAK-HOUR SCHEDULE (IST) ─────────────────────────────────────────────────
-// IST = UTC+5:30
-// Peak:     7-9am, 12-2pm, 7-11pm → post every 30 min
-// Off-peak: 9am-12pm, 2-7pm       → post every 60 min
-// Total: ~24 posts/day (Instagram API max is 25)
-const POST_SCHEDULE = [
-  // ── MORNING PEAK (7:00–9:00 AM IST = 01:30–03:30 UTC) ──
-  { cron: "30 1 * * *",  label: "7:00 AM IST  🔥 peak" },
-  { cron: "0  2 * * *",  label: "7:30 AM IST  🔥 peak" },
-  { cron: "30 2 * * *",  label: "8:00 AM IST  🔥 peak" },
-  { cron: "0  3 * * *",  label: "8:30 AM IST  🔥 peak" },
-  // ── OFF-PEAK (9:00 AM–12:00 PM IST = 03:30–06:30 UTC) ──
-  { cron: "30 3 * * *",  label: "9:00 AM IST" },
-  { cron: "30 4 * * *",  label: "10:00 AM IST" },
-  { cron: "30 5 * * *",  label: "11:00 AM IST" },
-  // ── LUNCH PEAK (12:00–2:00 PM IST = 06:30–08:30 UTC) ──
-  { cron: "30 6 * * *",  label: "12:00 PM IST 🔥 peak" },
-  { cron: "0  7 * * *",  label: "12:30 PM IST 🔥 peak" },
-  { cron: "30 7 * * *",  label: "1:00 PM IST  🔥 peak" },
-  { cron: "0  8 * * *",  label: "1:30 PM IST  🔥 peak" },
-  // ── OFF-PEAK (2:00–7:00 PM IST = 08:30–13:30 UTC) ──
-  { cron: "30 8 * * *",  label: "2:00 PM IST" },
-  { cron: "30 9 * * *",  label: "3:00 PM IST" },
-  { cron: "30 10 * * *", label: "4:00 PM IST" },
-  { cron: "30 11 * * *", label: "5:00 PM IST" },
-  { cron: "30 12 * * *", label: "6:00 PM IST" },
-  // ── EVENING PEAK (7:00–11:00 PM IST = 13:30–17:30 UTC) ──
-  { cron: "30 13 * * *", label: "7:00 PM IST  🔥 peak" },
-  { cron: "0  14 * * *", label: "7:30 PM IST  🔥 peak" },
-  { cron: "30 14 * * *", label: "8:00 PM IST  🔥 peak" },
-  { cron: "0  15 * * *", label: "8:30 PM IST  🔥 peak" },
-  { cron: "30 15 * * *", label: "9:00 PM IST  🔥 peak" },
-  { cron: "0  16 * * *", label: "9:30 PM IST  🔥 peak" },
-  { cron: "30 16 * * *", label: "10:00 PM IST 🔥 peak" },
-  { cron: "0  17 * * *", label: "10:30 PM IST 🔥 peak" },
-];
+// Posting cadence is random (10–30 min) — see scheduleNextPost() below.
 
 // Growth engine: every 60 min during active hours (10 cycles/day)
 const GROWTH_SCHEDULES = [
@@ -149,22 +114,47 @@ const GROWTH_SCHEDULES = [
   "0  16 * * *", // 9:30 PM IST (peak — max follows)
 ];
 
+// ─── RANDOM-INTERVAL POST TRIGGER (10–30 min, active hours only) ──────────────
+// Posts at a fresh random gap each time so the cadence looks human, not robotic.
+const POST_MIN_MINUTES = Number(process.env.POST_MIN_MINUTES) || 10;
+const POST_MAX_MINUTES = Number(process.env.POST_MAX_MINUTES) || 30;
+const ACTIVE_START_IST = Number(process.env.ACTIVE_START_IST) || 7;   // 7 AM IST
+const ACTIVE_END_IST   = Number(process.env.ACTIVE_END_IST)   || 23;  // 11 PM IST
+
+function istHour() {
+  return Number(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour: "2-digit", hour12: false }));
+}
+
+function scheduleNextPost() {
+  const minutes = POST_MIN_MINUTES + Math.random() * (POST_MAX_MINUTES - POST_MIN_MINUTES);
+  const ms = Math.round(minutes * 60 * 1000);
+  const fireAt = new Date(Date.now() + ms).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" });
+  console.log(`   ⏰ Next post in ${minutes.toFixed(1)} min (~${fireAt} IST)`);
+
+  setTimeout(async () => {
+    const h = istHour();
+    if (h >= ACTIVE_START_IST && h < ACTIVE_END_IST) {
+      console.log(`\n⏰ Random trigger fired (${h}:00 IST active window)`);
+      try { await runPostPipeline(); } catch (e) { console.error("Post error:", e.message); }
+    } else {
+      console.log(`\n😴 ${h}:00 IST — off-hours, skipping post`);
+    }
+    scheduleNextPost(); // reschedule with a new random gap
+  }, ms);
+}
+
 function startScheduler() {
-  console.log("\n🗓️  PEAK-OPTIMISED SCHEDULER ACTIVE — 24 posts/day");
+  console.log(`\n🗓️  RANDOM-INTERVAL SCHEDULER ACTIVE — every ${POST_MIN_MINUTES}-${POST_MAX_MINUTES} min`);
   console.log("─".repeat(60));
 
-  POST_SCHEDULE.forEach(({ cron: cronExpr, label }) => {
-    console.log(`   ⏰ ${label}`);
-    cron.schedule(cronExpr, () => {
-      console.log(`\n⏰ Scheduled trigger: ${label}`);
-      runPostPipeline();
-    }, { timezone: "UTC" });
-  });
+  scheduleNextPost();
 
+  const avgGap = (POST_MIN_MINUTES + POST_MAX_MINUTES) / 2;
+  const perDay = Math.round(((ACTIVE_END_IST - ACTIVE_START_IST) * 60) / avgGap);
   console.log("─".repeat(60));
-  console.log(`   📊 24 posts/day — 168/week — ~720/month`);
-  console.log(`   🔥 Peak hours (7-9am, 12-2pm, 7-11pm) → post every 30 min`);
-  console.log(`   🌐 9-layer image fallback — SVG canvas as final guarantee`);
+  console.log(`   📊 ~${perDay} posts/day (active ${ACTIVE_START_IST}:00–${ACTIVE_END_IST}:00 IST)`);
+  console.log(`   🎲 Randomised gaps so cadence looks human`);
+  console.log(`   🌐 Free photo sources (Wikimedia/Openverse) + branded compositing + SVG fallback`);
 
   // Growth engine schedule
   if (process.env.IG_USERNAME && process.env.IG_PASSWORD) {
