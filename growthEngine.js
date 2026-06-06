@@ -404,6 +404,71 @@ async function followBack(max = 20) {
   return followed;
 }
 
+// ─── DM LOG (track who we've already welcomed) ────────────────────────────────
+const DM_LOG = path.join(__dirname, "dm_log.json");
+function loadDmLog() { try { return JSON.parse(fs.readFileSync(DM_LOG, "utf8")); } catch { return {}; } }
+function saveDmLog(d) { try { fs.writeFileSync(DM_LOG, JSON.stringify(d, null, 2)); } catch {} }
+
+// ─── SEND A DIRECT MESSAGE ────────────────────────────────────────────────────
+// Returns: 'ok' | 'session_expired' | 'ratelimit' | 'challenge' | 'error'
+async function sendDM(userId, text) {
+  const uuid = require("crypto").randomUUID();
+  const body =
+    `recipient_users=${encodeURIComponent(JSON.stringify([[Number(userId)]]))}` +
+    `&action=send_item&client_context=${uuid}&mutation_token=${uuid}` +
+    `&text=${encodeURIComponent(text)}&_uuid=${uuid}&device_id=android-${uuid.replace(/-/g, "").slice(0, 16)}`;
+  try {
+    const r = await axios.post(
+      "https://i.instagram.com/api/v1/direct_v2/threads/broadcast/text/",
+      body,
+      { headers: { ...getHeaders(), "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }, timeout: 15000, validateStatus: () => true }
+    );
+    if (r.status === 200 && (r.data?.status === "ok" || r.data?.payload)) return "ok";
+    if (r.status === 403 || r.status === 401) return "session_expired";
+    if (r.status === 429) return "ratelimit";
+    const msg = JSON.stringify(r.data || "").toLowerCase();
+    if (msg.includes("challenge") || msg.includes("feedback_required")) return "challenge";
+    return "error";
+  } catch { return "error"; }
+}
+
+// ─── WELCOME-DM NEW FOLLOWERS ─────────────────────────────────────────────────
+async function dmNewFollowers(max = 5) {
+  const ok = await verifySession();
+  if (!ok) { console.log("⚠️  Session invalid — run node get-session.js"); return 0; }
+
+  const remaining = LIMITS.dms - todayCount("dm");
+  if (remaining <= 0) { console.log("⏸️  Daily DM limit reached"); return 0; }
+  const target = Math.min(max, remaining);
+
+  const dmLog = loadDmLog();
+  const followers = await getOwnFollowers(Math.max(50, target * 5));
+  const fresh = followers.filter((f) => f.pk && !dmLog[f.pk]);
+  console.log(`✉️  Welcome-DM: ${fresh.length} un-messaged followers, sending up to ${target}`);
+
+  let sent = 0;
+  for (const f of fresh) {
+    if (sent >= target) break;
+    const text = DM_WELCOME[Math.floor(Math.random() * DM_WELCOME.length)];
+    await delay(60000, 120000); // 60-120s between DMs — DMs are heavily rate-limited
+    const result = await sendDM(f.pk, text);
+    if (result === "ok") {
+      dmLog[f.pk] = { username: f.username, dmAt: new Date().toISOString() };
+      logAction("dm", `@${f.username}`);
+      sent++;
+      console.log(`   ✅ Welcomed @${f.username} (${sent}/${target})`);
+    } else if (result === "session_expired" || result === "challenge") {
+      console.log(`   ⚠️ Stopping DMs (${result})`);
+      break;
+    } else if (result === "ratelimit") {
+      console.log("   ⏸️ DM rate limit — stopping");
+      break;
+    }
+  }
+  saveDmLog(dmLog);
+  return sent;
+}
+
 // ─── FOLLOW MORE — follow-back first, then top up from hashtags ───────────────
 async function followMore(total = 20) {
   let done = await followBack(total);
@@ -440,6 +505,12 @@ async function runGrowthCycle() {
     await delay(6000, 12000);
     if (Math.random() > 0.4) await commentFromHashtag(tag, 3);  // 3 comments, 60% chance
     await delay(8000, 15000);
+  }
+
+  // Welcome-DM new followers (opt-in — set ENABLE_WELCOME_DM=true; DMs are the
+  // highest ban-risk action, so it's off by default and low-volume when on).
+  if (process.env.ENABLE_WELCOME_DM === "true") {
+    await dmNewFollowers(2);
   }
 
   const hour = new Date().getHours();
@@ -505,5 +576,7 @@ module.exports = {
   followBack,
   followMore,
   getOwnFollowers,
+  sendDM,
+  dmNewFollowers,
   startSessionKeepAlive,
 };

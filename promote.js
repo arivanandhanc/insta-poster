@@ -13,7 +13,7 @@ require("dotenv").config();
 
 const { runPostPipeline } = require("./scheduler");
 const {
-  followMore, followBack, likeFromHashtag, commentFromHashtag, getGrowthStats,
+  followMore, followBack, likeFromHashtag, commentFromHashtag, dmNewFollowers, getGrowthStats,
 } = require("./growthEngine");
 
 const TAGS = ["tamilculture", "tamilnadu", "tamilhistory", "tamiltemples", "tamilpride", "tamilfood"];
@@ -42,8 +42,9 @@ async function main() {
   else if (cmd === "followmore")  await followMore(n || 25);
   else if (cmd === "followback")  await followBack(n || 20);
   else if (cmd === "engage")      await doEngage(n || 6);
-  else if (cmd === "all")       { await doPost(); await doEngage(6); await followMore(25); }
-  else { console.log("Unknown command. Use: post | followmore | followback | engage | all"); process.exit(1); }
+  else if (cmd === "dm")          await dmNewFollowers(n || 5);
+  else if (cmd === "all")       { await doPost(); await doEngage(6); await followMore(25); await dmNewFollowers(5); }
+  else { console.log("Unknown command. Use: post | followmore | followback | engage | dm | all"); process.exit(1); }
 
   const s = getGrowthStats().today;
   console.log(`\n[${stamp()}] 📊 TODAY → follows ${s.follows}/60 · likes ${s.likes}/150 · comments ${s.comments}/20`);

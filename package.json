@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node server.js",
     "test": "node test-all.js",
-    "test:quick": "node test-all.js --quick"
+    "test:quick": "node test-all.js --quick",
+    "promote": "node promote.js all",
+    "post": "node promote.js post",
+    "session": "node get-session.js"
   },
   "keywords": [],
   "author": "",
